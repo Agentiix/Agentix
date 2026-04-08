@@ -56,11 +56,14 @@ async def run_agent(req: RunRequest):
         raise HTTPException(status_code=503, detail="Agent runner has no run() function")
 
     try:
-        result = await _agent_runner.run(req.agent_input)
+        run_result = await _agent_runner.run(req.agent_input)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-    return RunResponse(result=result)
+    return RunResponse(
+        output=run_result.output,
+        trajectory=run_result.trajectory.model_dump() if run_result.trajectory else None,
+    )
 
 
 @app.post("/exec", response_model=ExecResponse)

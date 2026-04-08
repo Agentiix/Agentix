@@ -2,12 +2,26 @@
 
 Each agents/{name}/runner.py must export:
 
-    async def run(agent_input: dict) -> dict
+    async def run(agent_input: dict) -> RunResult
 
-That's it. The runtime server loads runner.py and calls run().
+RunResult contains the agent output and an ATIF trajectory
+for training data collection.
 """
+
+from __future__ import annotations
 
 from typing import Callable, Coroutine, Any
 
-# The type signature every runner.run must match.
-RunFn = Callable[[dict], Coroutine[Any, Any, dict]]
+from pydantic import BaseModel
+
+from agentix.trajectory import Trajectory
+
+
+class RunResult(BaseModel):
+    """Standard return type for agent runners."""
+
+    output: dict  # agent-specific output (exit_code, stdout, etc.)
+    trajectory: Trajectory | None = None  # ATIF trajectory for training
+
+
+RunFn = Callable[[dict], Coroutine[Any, Any, RunResult]]

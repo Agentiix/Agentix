@@ -36,7 +36,8 @@ class RunRequest(BaseModel):
 
 
 class RunResponse(BaseModel):
-    result: dict
+    output: dict
+    trajectory: dict | None = None
 
 
 # ── Deployment ────────────────────────────────────────────────────

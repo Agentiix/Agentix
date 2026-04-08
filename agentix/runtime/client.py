@@ -43,12 +43,15 @@ class RuntimeClient:
                 await asyncio.sleep(interval)
         raise TimeoutError(f"agentix server not alive after {timeout}s")
 
-    async def run(self, agent_input: dict) -> dict:
-        """Call the agent's run() function inside the sandbox."""
+    async def run(self, agent_input: dict) -> RunResponse:
+        """Call the agent's run() function inside the sandbox.
+
+        Returns RunResponse with .output (dict) and .trajectory (dict | None).
+        """
         req = RunRequest(agent_input=agent_input)
         r = await self._client.post("/run", json=req.model_dump())
         r.raise_for_status()
-        return RunResponse.model_validate(r.json()).result
+        return RunResponse.model_validate(r.json())
 
     async def exec(
         self,
