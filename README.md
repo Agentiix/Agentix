@@ -7,30 +7,23 @@
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![GitHub Stars](https://img.shields.io/github/stars/Agentiix/Agentix)](https://github.com/Agentiix/Agentix)
 
-Agentix packages coding agents as reproducible **Nix closures** and injects them into any benchmark's Docker image — SWE-bench, OpenSWE, OS-World, and more. One agent build, every benchmark.
-
 </div>
 
----
+Agentix packages coding agents as reproducible **Nix closures** and injects them into any benchmark's Docker image — SWE-bench, OpenSWE, OS-World, and more. One agent build, every benchmark.
 
-## Core Ideas
-
-**Any Agent** — Claude Code, Codex, Aider, SWE-agent, OpenHands. Each agent is a self-contained Nix closure (binary + all deps + Python adapter).
-
-**Any Benchmark** — SWE-bench, SWE-bench Pro, OpenSWE, OS-World, HumanEval. The agent closure mounts into any benchmark's Docker image via `-v /nix/store:/nix/store:ro`.
-
-**Deployment Agnostic** — Docker, Kubernetes, Modal, E2B. The runtime server is a pure sandbox interface that doesn't care where it runs.
-
-**Reproducible** — Same git commit = same binaries, forever. Nix guarantees bit-for-bit reproducibility.
+**Any Agent** — Claude Code, Codex, Aider, SWE-agent, OpenHands.
+**Any Benchmark** — SWE-bench, SWE-bench Pro, OpenSWE, OS-World, HumanEval.
+**Reproducible** — Same git commit = same binaries, forever.
+**Deployment Agnostic** — Docker, Kubernetes, Modal, E2B.
 
 ## Quick Start
 
 ```bash
-# Build agent and runtime closures
+# Build
 RUNTIME=$(nix build .#runtime --no-link --print-out-paths)
 AGENT=$(nix build .#claude-code --no-link --print-out-paths)
 
-# Inject into any Docker image (ubuntu, swebench, os-world, ...)
+# Inject into any benchmark Docker image
 docker run -d --name sandbox \
   -v /nix/store:/nix/store:ro \
   -e PATH=$AGENT/bin:$RUNTIME/bin:/usr/bin:/bin \
@@ -38,7 +31,7 @@ docker run -d --name sandbox \
   ubuntu:24.04 \
   $RUNTIME/bin/agentix-server
 
-# Run the agent
+# Run agent
 curl -X POST localhost:8000/exec \
   -H "Content-Type: application/json" \
   -d '{"command": "claude -p \"Fix the bug in main.py\" --output-format text"}'
@@ -47,17 +40,31 @@ curl -X POST localhost:8000/exec \
 curl "localhost:8000/download?path=/workspace/main.py"
 ```
 
-## Agent Adapter
+## How It Works
 
-Each agent has a `runner.py` — a thin adapter that calls the CLI binary and returns structured output:
+Each agent is a **Nix closure** (binary + deps + adapter), injected into containers via volume mount:
+
+```bash
+-v /nix/store:/nix/store:ro   # mount closures read-only
+-e PATH=$AGENT/bin:...        # expose agent binary
+```
+
+The **runtime server** inside the sandbox provides a universal HTTP interface:
+
+| Endpoint | Purpose |
+|----------|---------|
+| `POST /exec` | Execute commands |
+| `POST /upload` | Upload files |
+| `GET /download` | Download files |
+| `GET /health` | Health check |
+
+The **agent adapter** (`runner.py`) calls the CLI binary and returns structured output:
 
 ```python
 async def run(agent_input: AgentInput) -> AgentOutput:
     # AgentInput:  instruction, workdir, env
     # AgentOutput: exit_code, stdout, stderr, trajectory
 ```
-
-Agent-specific config (model, API keys, timeout) goes through environment variables, not function parameters.
 
 ## Repositories
 
@@ -76,19 +83,3 @@ Agent-specific config (model, API keys, timeout) goes through environment variab
 | **2** | Partial Rollout — search & RL over trajectories | Planned |
 
 See [ROADMAP.md](ROADMAP.md) for details.
-
-## Project Structure
-
-```
-agentix/
-├── runtime/        # FastAPI server + async client
-├── deployment/     # Sandbox lifecycle (Docker, K8s, ...)
-├── agents/         # AgentInput / AgentOutput protocol
-└── models.py       # Pydantic models
-```
-
-## Docs
-
-- [Architecture](docs/architecture.md)
-- [Agent Protocol](docs/agent-protocol.md)
-- [Development](docs/DEVELOPMENT.md)
