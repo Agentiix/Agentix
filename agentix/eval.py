@@ -1,10 +1,10 @@
 """Eval CLI: runs inside the sandbox.
 
 Usage:
-    python -m agentix.eval --agent /opt/agent --dataset /opt/dataset [--output /output/result.json]
+    python -m agentix.eval --agent /opt/agent [--dataset /opt/dataset] [--output /output/result.json]
 
-Orchestrates: dataset.setup → runner.run → dataset.verify
-Writes result to --output as JSON.
+Orchestrates: dataset.setup(ctx) → runner.run(ctx) → dataset.verify(ctx)
+All functions receive and return plain dicts. No agentix import required in plugins.
 """
 
 from __future__ import annotations
@@ -48,49 +48,53 @@ async def run_eval(agent_dir: str, dataset_dir: str | None, output_path: str) ->
         if dataset_path.exists():
             dataset = _load_module(dataset_path, "dataset_plugin")
 
-    # 1. Setup
-    agent_input = {}
+    # Build initial context
+    ctx = {
+        "agent_dir": agent_dir,
+        "dataset_dir": dataset_dir,
+        "workdir": os.getcwd(),
+    }
+
+    # 1. Setup — dataset prepares environment, returns agent input
     if dataset and hasattr(dataset, "setup"):
-        logger.info("Running dataset.setup()")
-        agent_input = await dataset.setup()
+        logger.info("dataset.setup()")
+        setup_result = await dataset.setup(ctx)
+        ctx.update(setup_result)
 
-    # 2. Run agent
-    logger.info("Running agent")
-    run_result = await runner.run(agent_input)
+    # 2. Run — agent executes
+    logger.info("runner.run()")
+    run_result = await runner.run(ctx)
+    ctx["run_result"] = run_result
 
-    # 3. Verify
+    # 3. Verify — dataset collects metrics
     metrics = {}
     if dataset and hasattr(dataset, "verify"):
-        logger.info("Running dataset.verify()")
-        metrics = await dataset.verify()
+        logger.info("dataset.verify()")
+        metrics = await dataset.verify(ctx)
 
-    # Build result
+    # Build output
     result = {
-        "output": run_result.output,
-        "trajectory": run_result.trajectory.model_dump() if run_result.trajectory else None,
+        "output": run_result,
         "metrics": metrics,
     }
 
-    # Write output
+    # Write
     out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(result, indent=2, default=str))
-    logger.info("Result written to %s", output_path)
+    logger.info("Result → %s", output_path)
 
     return result
 
 
 def main():
     parser = argparse.ArgumentParser(description="agentix eval")
-    parser.add_argument("--agent", required=True, help="Agent plugin path")
-    parser.add_argument("--dataset", default=None, help="Dataset plugin path")
-    parser.add_argument("--output", default="/output/result.json", help="Output JSON path")
+    parser.add_argument("--agent", required=True)
+    parser.add_argument("--dataset", default=None)
+    parser.add_argument("--output", default="/output/result.json")
     args = parser.parse_args()
 
-    result = asyncio.run(run_eval(args.agent, args.dataset, args.output))
-
-    if result.get("output", {}).get("exit_code", 1) != 0:
-        sys.exit(1)
+    asyncio.run(run_eval(args.agent, args.dataset, args.output))
 
 
 if __name__ == "__main__":

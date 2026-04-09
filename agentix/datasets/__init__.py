@@ -1,3 +1,3 @@
-from agentix.datasets.protocol import DatasetPlugin, EvalResult
+from agentix.datasets.protocol import SetupFn, VerifyFn
 
-__all__ = ["DatasetPlugin", "EvalResult"]
+__all__ = ["SetupFn", "VerifyFn"]

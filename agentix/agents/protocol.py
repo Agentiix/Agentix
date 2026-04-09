@@ -1,24 +1,15 @@
 """Agent plugin protocol.
 
-Every plugin closure contains a runner.py with:
+runner.py must export:
 
-    async def run(agent_input: dict) -> RunResult
+    async def run(ctx: dict) -> dict
+
+That's it. No imports required. ctx and return value are free-form dicts.
+Agentix helpers (RunResult, Trajectory) are optional conveniences.
 """
 
 from __future__ import annotations
 
 from typing import Callable, Coroutine, Any
 
-from pydantic import BaseModel
-
-from agentix.trajectory import Trajectory
-
-
-class RunResult(BaseModel):
-    """Standard return type for agent runners."""
-
-    output: dict
-    trajectory: Trajectory | None = None
-
-
-RunFn = Callable[[dict], Coroutine[Any, Any, RunResult]]
+RunFn = Callable[[dict], Coroutine[Any, Any, dict]]

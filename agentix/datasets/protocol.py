@@ -1,29 +1,17 @@
 """Dataset plugin protocol.
 
-Every dataset plugin provides a dataset.py with:
+dataset.py must export:
 
-    async def setup() -> dict        # init environment, return agent_input
-    async def verify() -> dict       # after agent runs, collect metrics
+    async def setup(ctx: dict) -> dict    # init environment, return agent input
+    async def verify(ctx: dict) -> dict   # after agent runs, return metrics
 
-Both run inside the sandbox with direct filesystem access.
+Both receive ctx (free-form dict) and return free-form dict.
+No imports required.
 """
 
 from __future__ import annotations
 
 from typing import Callable, Coroutine, Any
 
-from pydantic import BaseModel
-
-from agentix.agents.protocol import RunResult
-
-
-class EvalResult(BaseModel):
-    """Complete result of one evaluation: setup → run → verify."""
-
-    agent_output: dict
-    trajectory: dict | None = None
-    metrics: dict
-
-
-SetupFn = Callable[[], Coroutine[Any, Any, dict]]
-VerifyFn = Callable[[], Coroutine[Any, Any, dict]]
+SetupFn = Callable[[dict], Coroutine[Any, Any, dict]]
+VerifyFn = Callable[[dict], Coroutine[Any, Any, dict]]
