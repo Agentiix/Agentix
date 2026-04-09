@@ -1,4 +1,4 @@
-"""Shared models for agentix runtime, client, and deployment."""
+"""Shared models for Agentix."""
 
 from __future__ import annotations
 
@@ -10,9 +10,9 @@ from pydantic import BaseModel, Field
 
 class ExecRequest(BaseModel):
     command: str
-    timeout: float | None = Field(default=None, description="Timeout in seconds")
-    cwd: str | None = Field(default=None, description="Working directory")
-    env: dict[str, str] | None = Field(default=None, description="Extra environment variables")
+    timeout: float | None = Field(default=None)
+    cwd: str | None = Field(default=None)
+    env: dict[str, str] | None = Field(default=None)
 
 
 class ExecResponse(BaseModel):
@@ -24,7 +24,8 @@ class ExecResponse(BaseModel):
 class HealthResponse(BaseModel):
     status: str = "ok"
     version: str
-    plugin: str | None = None
+    agent_plugin: str | None = None
+    dataset_plugin: str | None = None
 
 
 class UploadResponse(BaseModel):
@@ -41,16 +42,27 @@ class RunResponse(BaseModel):
     trajectory: dict | None = None
 
 
+class EvalRequest(BaseModel):
+    agent_input: dict | None = None  # optional overrides, merged with dataset.setup()
+
+
+class EvalResponse(BaseModel):
+    output: dict
+    trajectory: dict | None = None
+    metrics: dict
+
+
 # ── Deployment ────────────────────────────────────────────────────
 
 
 class SandboxConfig(BaseModel):
     task_image: str = Field(description="Docker image for the task environment")
     runtime_closure: str = Field(description="Nix store path for agentix runtime")
-    agent_closure: str = Field(description="Nix store path for agent")
+    agent_closure: str = Field(description="Nix store path for agent plugin")
+    dataset_closure: str | None = Field(default=None, description="Nix store path for dataset plugin")
 
 
 class SandboxInfo(BaseModel):
     sandbox_id: str
-    runtime_url: str = Field(description="agentix-server URL, e.g. http://localhost:18000")
+    runtime_url: str
     status: str = "running"

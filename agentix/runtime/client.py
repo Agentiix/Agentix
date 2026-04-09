@@ -10,7 +10,13 @@ from pathlib import Path
 
 import httpx
 
-from agentix.models import ExecRequest, ExecResponse, HealthResponse, RunRequest, RunResponse, UploadResponse
+from agentix.models import (
+    EvalRequest, EvalResponse,
+    ExecRequest, ExecResponse,
+    HealthResponse,
+    RunRequest, RunResponse,
+    UploadResponse,
+)
 
 
 class RuntimeClient:
@@ -42,6 +48,13 @@ class RuntimeClient:
             except (httpx.ConnectError, httpx.ReadError, httpx.TimeoutException):
                 await asyncio.sleep(interval)
         raise TimeoutError(f"agentix server not alive after {timeout}s")
+
+    async def eval(self, agent_input: dict | None = None) -> EvalResponse:
+        """Full eval: dataset.setup → runner.run → dataset.verify."""
+        req = EvalRequest(agent_input=agent_input)
+        r = await self._client.post("/eval", json=req.model_dump(exclude_none=True))
+        r.raise_for_status()
+        return EvalResponse.model_validate(r.json())
 
     async def run(self, agent_input: dict) -> RunResponse:
         """Call the agent's run() function inside the sandbox.

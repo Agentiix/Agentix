@@ -1,4 +1,4 @@
-"""Entry point: python -m agentix.runtime --plugin /path/to/plugin [--port 8000]"""
+"""Entry point: python -m agentix.runtime --agent <plugin> [--dataset <plugin>]"""
 
 import argparse
 
@@ -7,17 +7,19 @@ import uvicorn
 
 def main():
     parser = argparse.ArgumentParser(description="agentix runtime server")
-    parser.add_argument("--plugin", required=True, help="Path to agent plugin (dir with runner.py + bin/)")
-    parser.add_argument("--host", default="0.0.0.0", help="Bind address")
-    parser.add_argument("--port", type=int, default=8000, help="Bind port")
-    parser.add_argument("--debug", action="store_true", help="Enable debugpy")
-    parser.add_argument("--debug-port", type=int, default=5678, help="debugpy port")
-    parser.add_argument("--debug-wait", action="store_true", help="Wait for debugger")
+    parser.add_argument("--agent", required=True, help="Agent plugin path (dir with runner.py + bin/)")
+    parser.add_argument("--dataset", default=None, help="Dataset plugin path (dir with dataset.py)")
+    parser.add_argument("--host", default="0.0.0.0")
+    parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--debug", action="store_true")
+    parser.add_argument("--debug-port", type=int, default=5678)
+    parser.add_argument("--debug-wait", action="store_true")
     args = parser.parse_args()
 
-    # Load plugin before starting server
-    from agentix.runtime.server import load_plugin
-    load_plugin(args.plugin)
+    from agentix.runtime.server import load_agent_plugin, load_dataset_plugin
+    load_agent_plugin(args.agent)
+    if args.dataset:
+        load_dataset_plugin(args.dataset)
 
     if args.debug:
         import debugpy
@@ -26,7 +28,6 @@ def main():
         if args.debug_wait:
             print("Waiting for debugger to attach...")
             debugpy.wait_for_client()
-            print("Debugger attached.")
 
     uvicorn.run("agentix.runtime.server:app", host=args.host, port=args.port)
 
