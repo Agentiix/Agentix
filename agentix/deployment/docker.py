@@ -43,10 +43,14 @@ class DockerDeployment(Deployment):
             "--name", sandbox_id,
             "-v", "/nix/store:/nix/store:ro",
             "-e", f"PATH={config.agent_closure}/bin:{config.runtime_closure}/bin:/usr/local/bin:/usr/bin:/bin",
+        ]
+        if config.dataset_closure:
+            cmd.extend(["-e", f"PYTHONPATH={config.dataset_closure}/lib/python3.12/site-packages"])
+        cmd.extend([
             "-p", f"{port}:8000",
             config.task_image,
             f"{config.runtime_closure}/bin/agentix-server", "--port", "8000",
-        ]
+        ])
 
         proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -101,8 +105,9 @@ class DockerDeployment(Deployment):
         image_changed = config.task_image != sb.config.task_image
         agent_changed = config.agent_closure != sb.config.agent_closure
         runtime_changed = config.runtime_closure != sb.config.runtime_closure
+        dataset_changed = config.dataset_closure != sb.config.dataset_closure
 
-        if force_recreate or image_changed or runtime_changed:
+        if force_recreate or image_changed or runtime_changed or dataset_changed:
             # Full recreate — can't update base image or runtime in-place
             logger.info("Recreating sandbox %s (force=%s image=%s runtime=%s)",
                         sandbox_id, force_recreate, image_changed, runtime_changed)
