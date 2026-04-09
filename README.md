@@ -1,56 +1,83 @@
-# agentix
+# Agentix
 
-Coding Agent SDK: Nix-based agent packaging and sandboxed execution.
+Coding Agent SDK: run ANY agent on ANY environment, collect trajectories for training.
 
 ## Architecture
 
 ```
-Host                              Sandbox
- │                                 │
- │  nix build .#claude-code        │  agentix-server (:8000)
- │  nix build .#runtime            │  ├── POST /run    ← run agent
- │                                 │  ├── POST /exec   ← run command
- │  deployment.create(config)      │  ├── POST /upload
- │  client.run(agent_input)  ────► │  └── GET  /download
- │                                 │
- │  deployment.delete(id)          │  runner.py: run(agent_input) -> dict
+Host (Slime / Verl)                 Sandbox
+ │                                   │
+ │  client.exec(                     │  agentix-server (:8000)
+ │    "python -m agentix.eval        │  ├── POST /exec
+ │     --agent /opt/agent            │  ├── POST /upload
+ │     --dataset /opt/dataset"       │  ├── GET  /download
+ │  )                                │  └── GET  /health
+ │                                   │
+ │  client.download(                 │  agentix.eval CLI
+ │    "/output/result.json"          │  └── setup → run → verify
+ │  )                                │      → /output/result.json
+ │                                   │
+ │  Agent plugin    (Nix closure)    │  Dataset plugin  (Nix closure)
+ │  ├── bin/claude  (llm-agents.nix) │  └── dataset.py
+ │  └── runner.py   (trajectory)     │      setup() → agent_input
+ │                                   │      verify() → metrics
 ```
 
 ## Quick Start
 
 ```bash
-nix develop    # dev environment: python, ruff, pytest, docker
+nix develop
 
+# Build
 nix build .#runtime
 nix build .#claude-code
 
-RUNTIME=$(nix-build runtime/default.nix --no-out-link)
-AGENT=$(nix-build agents/claude-code/default.nix --no-out-link)
+# Run in Docker
+RUNTIME=$(nix build .#runtime --no-link --print-out-paths)
+AGENT=$(nix build .#claude-code --no-link --print-out-paths)
 
 docker run -d --name sandbox \
   -v /nix/store:/nix/store:ro \
-  -e "PATH=${AGENT}/bin:${RUNTIME}/bin:/usr/bin:/bin" \
-  -p 8000:8000 ubuntu:24.04 $RUNTIME/bin/agentix-server
+  -p 8000:8000 ubuntu:24.04 \
+  $RUNTIME/bin/agentix-server
 
-curl -X POST localhost:8000/run \
+# Eval
+curl -X POST localhost:8000/exec \
   -H "Content-Type: application/json" \
-  -d '{"agent_input": {"instruction": "hello", "api_key": "sk-..."}}'
+  -d "{\"command\": \"python -m agentix.eval --agent $AGENT\"}"
+```
+
+## Plugins
+
+**Agent plugin** — how to run an agent + collect trajectory:
+```
+agents/{name}/
+├── default.nix    # wraps llm-agents.nix binary + runner.py
+└── runner.py      # async def run(agent_input: dict) -> RunResult
+```
+
+**Dataset plugin** — environment setup + verification:
+```
+datasets/{name}/
+├── default.nix
+└── dataset.py     # async def setup() -> dict
+                   # async def verify() -> dict
 ```
 
 ## Structure
 
 ```
-src/agentix/
-├── runtime/           server (sandbox) + client (host)
-├── deployment/        sandbox CRUD (docker, k8s, ...)
+agentix/
+├── runtime/          server + client (sandbox interface)
+├── datasets/         dataset plugin protocol
+├── agents/           agent plugin protocol
+├── trajectory.py     ATIF v1.4 format
+├── eval.py           eval CLI (setup → run → verify)
 └── models.py
-
-agents/{name}/
-├── default.nix        nix packaging
-└── runner.py          run(agent_input: dict) -> dict
 ```
 
 ## Docs
 
-- [Architecture](docs/architecture.md) — protocols, API spec
-- [Development](docs/DEVELOPMENT.md) — setup, linting, debugging
+- [Architecture](docs/architecture.md)
+- [Agent Protocol](docs/agent-protocol.md)
+- [Development](docs/DEVELOPMENT.md)
