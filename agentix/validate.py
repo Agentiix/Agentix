@@ -8,11 +8,41 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import importlib.util
 import json
 import sys
 from pathlib import Path
 
-from agentix.eval import PluginLoadError, _load_module, _validate_agent, _validate_dataset
+
+class PluginLoadError(Exception):
+    """Raised when a plugin fails to load."""
+
+
+def _load_module(path: Path, name: str):
+    if not path.exists():
+        raise PluginLoadError(f"Plugin file not found: {path}")
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise PluginLoadError(f"Cannot import {path} — is it a valid Python file?")
+    module = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(module)
+    except Exception as exc:
+        raise PluginLoadError(f"Failed to load {path}: {exc}") from exc
+    return module
+
+
+def _validate_agent(module, path: Path):
+    if not hasattr(module, "run"):
+        raise PluginLoadError(f"{path} must define: async def run(ctx: dict) -> dict")
+    if not asyncio.iscoroutinefunction(module.run):
+        raise PluginLoadError(f"{path}: run() must be async (use 'async def run')")
+
+
+def _validate_dataset(module, path: Path):
+    for fn_name in ("setup", "verify"):
+        if hasattr(module, fn_name) and not asyncio.iscoroutinefunction(getattr(module, fn_name)):
+            raise PluginLoadError(f"{path}: {fn_name}() must be async")
 
 
 def validate_plugin(path: Path, kind: str) -> list[str]:
