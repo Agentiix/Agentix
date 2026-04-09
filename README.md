@@ -10,14 +10,14 @@
 
 </div>
 
-## Core Features
+## ✨ Core Features
 
 - **Any Agent** — Claude Code, Codex, Aider, SWE-agent, OpenHands. Each agent is packaged as a self-contained Nix closure.
 - **Any Dataset** — SWE-bench, SWE-bench Pro, OpenSWE, OS-World, HumanEval. Inject agent closures into any dataset environment.
 - **Reproducible** — Same git commit = same binaries, forever. Nix guarantees bit-for-bit reproducibility.
 - **Deployment Agnostic** — Docker, Kubernetes, Modal, E2B. The runtime server doesn't care where it runs.
 
-## Installation
+## 📦 Installation
 
 ```bash
 # From source
@@ -30,7 +30,7 @@ nix build .#runtime
 nix build .#claude-code
 ```
 
-## Quick Start
+## 🚀 Quick Start
 
 ```bash
 RUNTIME=$(nix build .#runtime --no-link --print-out-paths)
@@ -53,7 +53,7 @@ curl -X POST localhost:8000/exec \
 curl "localhost:8000/download?path=/workspace/main.py"
 ```
 
-## Architecture
+## 🏗️ Architecture
 
 Agentix sits between the orchestrator and the sandbox. The **runtime server** provides a universal HTTP interface inside any container. **Agent closures** are mounted read-only via Nix store.
 
@@ -72,7 +72,7 @@ async def run(agent_input: AgentInput) -> AgentOutput:
     # AgentOutput: exit_code, stdout, stderr, trajectory
 ```
 
-## Repositories
+## 📁 Repositories
 
 | Repo | Purpose |
 |------|---------|
@@ -80,7 +80,7 @@ async def run(agent_input: AgentInput) -> AgentOutput:
 | **[Agentix-Agents-Hub](https://github.com/Agentiix/Agentix-Agents-Hub)** | Agent adapters — claude-code, aider, ... |
 | **[Agentix-Datasets](https://github.com/Agentiix/Agentix-Datasets)** | Benchmark runners — SWE-bench, ... |
 
-## Roadmap
+## 🗺️ Roadmap
 
 | Phase | Focus | Status |
 |-------|-------|--------|
@@ -90,10 +90,10 @@ async def run(agent_input: AgentInput) -> AgentOutput:
 
 See [ROADMAP.md](ROADMAP.md) for details.
 
-## Contributing
+## 🤝 Contributing
 
 We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) for details.
 
-## License
+## 📄 License
 
 [MIT License](LICENSE)
