@@ -9,6 +9,10 @@ from pathlib import Path
 
 logger = logging.getLogger("agentix.runtime")
 
+UPLOAD_ROOT = Path(os.environ.get("AGENTIX_UPLOAD_ROOT", "/workspace")).resolve()
+
+MAX_OUTPUT_BYTES = 10 * 1024 * 1024  # 10 MiB
+
 
 class Executor:
     """Runs commands and handles files inside the sandbox.
@@ -17,12 +21,37 @@ class Executor:
     in Docker, Modal, Daytona, or bare metal.
     """
 
+    async def _read_capped(self, stream, limit: int) -> str:
+        """Read from an async stream up to *limit* bytes.
+
+        If the stream produces more data than *limit*, the output is
+        truncated and a ``[truncated]`` marker is appended.
+        """
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = await stream.read(8192)
+            if not chunk:
+                break
+            remaining = limit - total
+            if remaining <= 0:
+                break
+            if len(chunk) > remaining:
+                chunks.append(chunk[:remaining])
+                total += remaining
+                chunks.append(b"\n[truncated at %d bytes]" % limit)
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+        return b"".join(chunks).decode(errors="replace")
+
     async def exec(
         self,
         command: str,
         timeout: float | None = None,
         cwd: str | None = None,
         extra_env: dict[str, str] | None = None,
+        max_output: int = MAX_OUTPUT_BYTES,
     ) -> tuple[int, str, str]:
         """Execute a shell command.
 
@@ -41,9 +70,14 @@ class Executor:
                 cwd=cwd,
                 env=env,
             )
-            stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                proc.communicate(), timeout=timeout
-            )
+
+            async def _collect():
+                stdout = await self._read_capped(proc.stdout, max_output)
+                stderr = await self._read_capped(proc.stderr, max_output)
+                await proc.wait()
+                return stdout, stderr
+
+            stdout, stderr = await asyncio.wait_for(_collect(), timeout=timeout)
         except asyncio.TimeoutError:
             proc.kill()
             await proc.communicate()
@@ -51,20 +85,24 @@ class Executor:
 
         return (
             proc.returncode or 0,
-            stdout_bytes.decode(errors="replace"),
-            stderr_bytes.decode(errors="replace"),
+            stdout,
+            stderr,
         )
 
     def upload(self, data: bytes, dest: str) -> int:
         """Write bytes to a path. Creates parent dirs."""
-        p = Path(dest)
+        p = Path(dest).resolve()
+        if not p.is_relative_to(UPLOAD_ROOT):
+            raise PermissionError(f"Upload path {p} outside allowed root {UPLOAD_ROOT}")
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_bytes(data)
         return len(data)
 
     def download(self, path: str) -> bytes:
         """Read bytes from a path."""
-        p = Path(path)
+        p = Path(path).resolve()
+        if not p.is_relative_to(UPLOAD_ROOT):
+            raise PermissionError(f"Download path {p} outside allowed root {UPLOAD_ROOT}")
         if not p.exists():
             raise FileNotFoundError(f"Not found: {path}")
         return p.read_bytes()

@@ -34,8 +34,10 @@ class Deployment(ABC):
         """Get sandbox status."""
 
     @abstractmethod
-    async def update(self, sandbox_id: str, config: SandboxConfig) -> SandboxInfo:
-        """Update sandbox (e.g. swap agent closure)."""
+    async def update(self, sandbox_id: str, config: SandboxConfig,
+                     *, force_recreate: bool = False) -> SandboxInfo:
+        """Update sandbox config. Attempts in-place update when possible.
+        Falls back to recreate when base image or runtime changes, or force_recreate=True."""
 
     @abstractmethod
     async def delete(self, sandbox_id: str) -> None:

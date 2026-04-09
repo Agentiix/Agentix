@@ -13,6 +13,7 @@ class ExecRequest(BaseModel):
     timeout: float | None = Field(default=None)
     cwd: str | None = Field(default=None)
     env: dict[str, str] | None = Field(default=None)
+    max_output: int = Field(default=10_485_760, description="Max output bytes (default 10 MiB)")
 
 
 class ExecResponse(BaseModel):

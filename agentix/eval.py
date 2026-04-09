@@ -16,25 +16,64 @@ import json
 import logging
 import os
 import sys
+import time
+import uuid
 from pathlib import Path
+
+from agentix.ctx import apply_defaults, extract_schema, validate_provides, validate_requires
 
 logger = logging.getLogger("agentix.eval")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message)s")
 
 
+# ---------------------------------------------------------------------------
+# D1: Plugin loading with actionable error messages
+# ---------------------------------------------------------------------------
+
+class PluginLoadError(Exception):
+    """Raised when a plugin fails to load."""
+
+
 def _load_module(path: Path, name: str):
+    if not path.exists():
+        raise PluginLoadError(f"Plugin file not found: {path}")
     spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise PluginLoadError(f"Cannot import {path} — is it a valid Python file?")
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    try:
+        spec.loader.exec_module(module)
+    except Exception as exc:
+        raise PluginLoadError(f"Failed to load {path}: {exc}") from exc
     return module
 
 
-async def run_eval(agent_dir: str, dataset_dir: str | None, output_path: str) -> dict:
+def _validate_agent(module, path: Path):
+    if not hasattr(module, "run"):
+        raise PluginLoadError(f"{path} must define: async def run(ctx: dict) -> dict")
+    if not asyncio.iscoroutinefunction(module.run):
+        raise PluginLoadError(f"{path}: run() must be async (use 'async def run')")
+
+
+def _validate_dataset(module, path: Path):
+    for fn_name in ("setup", "verify"):
+        if hasattr(module, fn_name) and not asyncio.iscoroutinefunction(getattr(module, fn_name)):
+            raise PluginLoadError(f"{path}: {fn_name}() must be async")
+
+
+# ---------------------------------------------------------------------------
+# E2 + R6: Eval pipeline with lifecycle hooks and overall timeout
+# ---------------------------------------------------------------------------
+
+async def _run_eval_inner(agent_dir: str, dataset_dir: str | None, output_path: str) -> dict:
+    run_id = uuid.uuid4().hex[:8]
+    t0 = time.monotonic()
+    logger.info("[%s] eval start agent=%s dataset=%s", run_id, agent_dir, dataset_dir)
+
     # Load agent plugin
     runner_path = Path(agent_dir) / "runner.py"
-    if not runner_path.exists():
-        raise FileNotFoundError(f"No runner.py in {agent_dir}")
     runner = _load_module(runner_path, "agent_runner")
+    _validate_agent(runner, runner_path)
 
     # Add agent bin/ to PATH
     bin_dir = Path(agent_dir) / "bin"
@@ -47,6 +86,9 @@ async def run_eval(agent_dir: str, dataset_dir: str | None, output_path: str) ->
         dataset_path = Path(dataset_dir) / "dataset.py"
         if dataset_path.exists():
             dataset = _load_module(dataset_path, "dataset_plugin")
+            _validate_dataset(dataset, dataset_path)
+
+    logger.info("[%s] plugins loaded in %.1fs", run_id, time.monotonic() - t0)
 
     # Build initial context
     ctx = {
@@ -55,22 +97,61 @@ async def run_eval(agent_dir: str, dataset_dir: str | None, output_path: str) ->
         "workdir": os.getcwd(),
     }
 
-    # 1. Setup — dataset prepares environment, returns agent input
-    if dataset and hasattr(dataset, "setup"):
-        logger.info("dataset.setup()")
-        setup_result = await dataset.setup(ctx)
-        ctx.update(setup_result)
+    # Extract schemas (optional — plugins without CTX_SCHEMA are unaffected)
+    runner_schema = extract_schema(runner)
+    dataset_schema = extract_schema(dataset) if dataset else None
 
-    # 2. Run — agent executes
-    logger.info("runner.run()")
-    run_result = await runner.run(ctx)
-    ctx["run_result"] = run_result
-
-    # 3. Verify — dataset collects metrics
+    # Pipeline with lifecycle hooks
     metrics = {}
-    if dataset and hasattr(dataset, "verify"):
-        logger.info("dataset.verify()")
-        metrics = await dataset.verify(ctx)
+    try:
+        # 1. Setup — dataset prepares environment, returns agent input
+        if dataset and hasattr(dataset, "setup"):
+            if dataset_schema:
+                validate_requires(ctx, dataset_schema, "dataset")
+                apply_defaults(ctx, dataset_schema)
+            t_phase = time.monotonic()
+            logger.info("[%s] dataset.setup()", run_id)
+            setup_result = await dataset.setup(ctx)
+            ctx.update(setup_result)
+            if dataset_schema:
+                validate_provides(setup_result, dataset_schema, "dataset")
+            logger.info("[%s] dataset.setup() done in %.1fs", run_id, time.monotonic() - t_phase)
+
+        # 2. Run — agent executes (validate after setup merges into ctx)
+        if runner_schema:
+            validate_requires(ctx, runner_schema, "agent")
+            apply_defaults(ctx, runner_schema)
+        t_phase = time.monotonic()
+        logger.info("[%s] runner.run()", run_id)
+        run_result = await runner.run(ctx)
+        ctx["run_result"] = run_result
+        if runner_schema:
+            validate_provides(run_result, runner_schema, "agent")
+        logger.info("[%s] runner.run() done in %.1fs", run_id, time.monotonic() - t_phase)
+
+        # 3. Verify — dataset collects metrics
+        if dataset and hasattr(dataset, "verify"):
+            t_phase = time.monotonic()
+            logger.info("[%s] dataset.verify()", run_id)
+            metrics = await dataset.verify(ctx)
+            logger.info("[%s] dataset.verify() done in %.1fs", run_id, time.monotonic() - t_phase)
+    except Exception as exc:
+        # on_error hooks — optional, best-effort
+        for mod in [runner, dataset]:
+            if mod and hasattr(mod, "on_error"):
+                try:
+                    await mod.on_error(ctx, exc)
+                except Exception:
+                    logger.exception("on_error hook failed")
+        raise
+    finally:
+        # teardown hooks — always run, reverse order
+        for mod in [dataset, runner]:
+            if mod and hasattr(mod, "teardown"):
+                try:
+                    await mod.teardown(ctx)
+                except Exception:
+                    logger.exception("teardown hook failed")
 
     # Build output
     result = {
@@ -82,9 +163,21 @@ async def run_eval(agent_dir: str, dataset_dir: str | None, output_path: str) ->
     out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(result, indent=2, default=str))
-    logger.info("Result → %s", output_path)
+    logger.info("[%s] eval complete total=%.1fs", run_id, time.monotonic() - t0)
 
     return result
+
+
+async def run_eval(
+    agent_dir: str,
+    dataset_dir: str | None,
+    output_path: str,
+    timeout: float = 3600,
+) -> dict:
+    return await asyncio.wait_for(
+        _run_eval_inner(agent_dir, dataset_dir, output_path),
+        timeout=timeout,
+    )
 
 
 def main():
@@ -92,9 +185,11 @@ def main():
     parser.add_argument("--agent", required=True)
     parser.add_argument("--dataset", default=None)
     parser.add_argument("--output", default="/output/result.json")
+    parser.add_argument("--timeout", type=float, default=3600,
+                        help="Overall eval timeout in seconds (default: 3600)")
     args = parser.parse_args()
 
-    asyncio.run(run_eval(args.agent, args.dataset, args.output))
+    asyncio.run(run_eval(args.agent, args.dataset, args.output, timeout=args.timeout))
 
 
 if __name__ == "__main__":

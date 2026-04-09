@@ -6,18 +6,48 @@ Pure sandbox interface: exec, upload, download, health.
 from __future__ import annotations
 
 import asyncio
+import logging
 from pathlib import Path
 
 import httpx
 
 from agentix.models import ExecRequest, ExecResponse, HealthResponse, UploadResponse
 
+logger = logging.getLogger("agentix.runtime.client")
+
 
 class RuntimeClient:
     """Async client for the agentix runtime server."""
 
-    def __init__(self, base_url: str, timeout: float = 300):
-        self._client = httpx.AsyncClient(base_url=base_url, timeout=timeout)
+    def __init__(
+        self,
+        base_url: str,
+        token: str | None = None,
+        timeout: float = 300,
+        retries: int = 3,
+        retry_backoff: float = 1.0,
+    ):
+        headers = {"Authorization": f"Bearer {token}"} if token else {}
+        self._client = httpx.AsyncClient(base_url=base_url, timeout=timeout, headers=headers)
+        self._retries = retries
+        self._retry_backoff = retry_backoff
+
+    async def _with_retry(self, fn, *args, **kwargs):
+        """Retry on transient errors with exponential backoff."""
+        last_exc = None
+        for attempt in range(self._retries):
+            try:
+                return await fn(*args, **kwargs)
+            except (httpx.ConnectError, httpx.ReadError, httpx.TimeoutException) as exc:
+                last_exc = exc
+                if attempt < self._retries - 1:
+                    wait = self._retry_backoff * (2 ** attempt)
+                    logger.warning(
+                        "Retry %d/%d after %.1fs: %s",
+                        attempt + 1, self._retries, wait, exc,
+                    )
+                    await asyncio.sleep(wait)
+        raise last_exc
 
     async def close(self):
         await self._client.aclose()
@@ -51,25 +81,36 @@ class RuntimeClient:
         env: dict[str, str] | None = None,
     ) -> ExecResponse:
         req = ExecRequest(command=command, timeout=timeout, cwd=cwd, env=env)
-        r = await self._client.post("/exec", json=req.model_dump(exclude_none=True))
-        r.raise_for_status()
-        return ExecResponse.model_validate(r.json())
+
+        async def _do():
+            r = await self._client.post("/exec", json=req.model_dump(exclude_none=True))
+            r.raise_for_status()
+            return ExecResponse.model_validate(r.json())
+
+        return await self._with_retry(_do)
 
     async def upload(self, local_path: str | Path, dest: str) -> UploadResponse:
         p = Path(local_path)
-        with open(p, "rb") as f:
-            r = await self._client.post(
-                "/upload",
-                files={"file": (p.name, f)},
-                data={"path": dest},
-            )
-        r.raise_for_status()
-        return UploadResponse.model_validate(r.json())
+
+        async def _do():
+            with open(p, "rb") as f:
+                r = await self._client.post(
+                    "/upload",
+                    files={"file": (p.name, f)},
+                    data={"path": dest},
+                )
+            r.raise_for_status()
+            return UploadResponse.model_validate(r.json())
+
+        return await self._with_retry(_do)
 
     async def download(self, path: str, local_path: str | Path) -> int:
-        r = await self._client.get("/download", params={"path": path})
-        r.raise_for_status()
-        p = Path(local_path)
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_bytes(r.content)
-        return len(r.content)
+        async def _do():
+            r = await self._client.get("/download", params={"path": path})
+            r.raise_for_status()
+            lp = Path(local_path)
+            lp.parent.mkdir(parents=True, exist_ok=True)
+            lp.write_bytes(r.content)
+            return len(r.content)
+
+        return await self._with_retry(_do)

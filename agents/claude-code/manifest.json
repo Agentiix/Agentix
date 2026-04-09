@@ -1,0 +1,7 @@
+{
+    "name": "claude-code",
+    "version": "0.1.0",
+    "kind": "agent",
+    "description": "Claude Code coding agent",
+    "entry": "runner.py"
+}
