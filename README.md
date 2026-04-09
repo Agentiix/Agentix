@@ -4,24 +4,6 @@
 
 Agentix is the middleware layer between coding agents and sandboxed environments. It packages agents as reproducible Nix closures, injects them into any container, and provides a universal HTTP interface for execution and file transfer.
 
-```
-                     ┌─────────────────────────────────┐
-                     │          Sandbox                 │
-   Orchestrator      │                                  │
-   ───HTTP──────►    │   agentix-server (:8000)         │
-                     │   ├── POST /exec                 │
-                     │   ├── POST /upload                │
-                     │   ├── GET  /download              │
-                     │   └── GET  /health                │
-                     │                                  │
-                     │   Agent closure (Nix)             │
-                     │   ├── bin/claude (binary)         │
-                     │   └── runner.py  (adapter)        │
-                     │       async def run(AgentInput)   │
-                     │           → AgentOutput           │
-                     └─────────────────────────────────┘
-```
-
 ## Why
 
 - **Any Agent** — Claude Code, Codex, Aider, SWE-agent, OpenHands... each agent is a Nix closure with a thin Python adapter.
