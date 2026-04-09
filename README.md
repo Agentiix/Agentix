@@ -2,28 +2,41 @@
 
 # Agentix
 
-### Run Any Agent on Any Benchmark
+**Run Any Agent on Any Dataset. Ready for Agentic Reinforcement.**
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![GitHub Stars](https://img.shields.io/github/stars/Agentiix/Agentix)](https://github.com/Agentiix/Agentix)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 
 </div>
 
-Agentix packages coding agents as reproducible **Nix closures** and injects them into any benchmark's Docker image — SWE-bench, OpenSWE, OS-World, and more. One agent build, every benchmark.
+## Core Features
 
-**Any Agent** — Claude Code, Codex, Aider, SWE-agent, OpenHands.
-**Any Benchmark** — SWE-bench, SWE-bench Pro, OpenSWE, OS-World, HumanEval.
-**Reproducible** — Same git commit = same binaries, forever.
-**Deployment Agnostic** — Docker, Kubernetes, Modal, E2B.
+- **Any Agent** — Claude Code, Codex, Aider, SWE-agent, OpenHands. Each agent is packaged as a self-contained Nix closure.
+- **Any Dataset** — SWE-bench, SWE-bench Pro, OpenSWE, OS-World, HumanEval. Inject agent closures into any dataset's Docker image.
+- **Reproducible** — Same git commit = same binaries, forever. Nix guarantees bit-for-bit reproducibility.
+- **Deployment Agnostic** — Docker, Kubernetes, Modal, E2B. The runtime server doesn't care where it runs.
+
+## Installation
+
+```bash
+# From source
+git clone https://github.com/Agentiix/Agentix.git
+cd Agentix
+nix develop  # or: pip install -e .
+
+# Build closures
+nix build .#runtime
+nix build .#claude-code
+```
 
 ## Quick Start
 
 ```bash
-# Build
 RUNTIME=$(nix build .#runtime --no-link --print-out-paths)
 AGENT=$(nix build .#claude-code --no-link --print-out-paths)
 
-# Inject into any benchmark Docker image
+# Inject into any dataset Docker image
 docker run -d --name sandbox \
   -v /nix/store:/nix/store:ro \
   -e PATH=$AGENT/bin:$RUNTIME/bin:/usr/bin:/bin \
@@ -40,25 +53,18 @@ curl -X POST localhost:8000/exec \
 curl "localhost:8000/download?path=/workspace/main.py"
 ```
 
-## How It Works
+## Architecture
 
-Each agent is a **Nix closure** (binary + deps + adapter), injected into containers via volume mount:
+Agentix sits between the orchestrator and the sandbox. The **runtime server** provides a universal HTTP interface inside any container. **Agent closures** are mounted read-only via Nix store.
 
-```bash
--v /nix/store:/nix/store:ro   # mount closures read-only
--e PATH=$AGENT/bin:...        # expose agent binary
-```
+| Component | Role |
+|-----------|------|
+| **Runtime Server** | FastAPI server inside sandbox — `/exec`, `/upload`, `/download`, `/health` |
+| **Agent Closure** | Nix package — agent binary + all deps + Python adapter |
+| **Deployment** | Sandbox lifecycle management — create, get, update, delete |
+| **Agent Adapter** | `runner.py` — calls CLI binary, returns `AgentOutput` with trajectory |
 
-The **runtime server** inside the sandbox provides a universal HTTP interface:
-
-| Endpoint | Purpose |
-|----------|---------|
-| `POST /exec` | Execute commands |
-| `POST /upload` | Upload files |
-| `GET /download` | Download files |
-| `GET /health` | Health check |
-
-The **agent adapter** (`runner.py`) calls the CLI binary and returns structured output:
+### Agent Adapter Protocol
 
 ```python
 async def run(agent_input: AgentInput) -> AgentOutput:
@@ -78,8 +84,16 @@ async def run(agent_input: AgentInput) -> AgentOutput:
 
 | Phase | Focus | Status |
 |-------|-------|--------|
-| **0** | Agent evaluation on benchmarks | In Progress |
+| **0** | Agent evaluation on datasets | In Progress |
 | **1** | LLM Proxy — token-level trajectory tracing | Planned |
 | **2** | Partial Rollout — search & RL over trajectories | Planned |
 
 See [ROADMAP.md](ROADMAP.md) for details.
+
+## Contributing
+
+We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) for details.
+
+## License
+
+[MIT License](LICENSE)
