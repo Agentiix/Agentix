@@ -1,24 +1,20 @@
-"""End-to-end example: Claude Code on SWE-bench via closure protocol.
+"""End-to-end: Claude Code on SWE-bench via closure protocol.
 
 Demonstrates: load closures → setup → run → verify → unload.
-Works with both stubs (local testing) and real closures (Nix builds).
 
 Usage:
     # Start runtime server
     python -m agentix.runtime --port 8000 &
 
-    # Run with stubs (no external deps)
+    # Run on a single instance
     python examples/claude-code-swebench/run.py \
         --server http://localhost:8000 \
-        --agent ./examples/claude-code-swebench/stubs/agent \
-        --dataset ./examples/claude-code-swebench/stubs/dataset
+        --agent ../Agentix-Agents-Hub/claude-code \
+        --dataset ../Agentix-Datasets/swebench \
+        --instance-file instance.json
 
-    # Run with real closures
-    python examples/claude-code-swebench/run.py \
-        --server http://localhost:8000 \
-        --agent /nix/store/xxx-claude-code \
-        --dataset /nix/store/xxx-swebench \
-        --instance-file instances/django__django-16139.json
+    # instance.json (from preprocess.py):
+    # {"instance_id": "django__django-16139", "problem_statement": "...", "repo": "django/django"}
 """
 
 from __future__ import annotations
@@ -44,6 +40,7 @@ async def run_pipeline(
     agent_path: str,
     dataset_path: str,
     instance: dict,
+    eval_script: str | None,
     output: str,
 ):
     t0 = time.monotonic()
@@ -54,48 +51,47 @@ async def run_pipeline(
 
         # 1. Load closures
         logger.info("Loading closures...")
-        agent_ns = await client.load(agent_path, namespace="claude")
-        logger.info("  loaded agent as '%s'", agent_ns)
-
-        dataset_ns = await client.load(dataset_path, namespace="swebench")
-        logger.info("  loaded dataset as '%s'", dataset_ns)
+        await client.load(agent_path, namespace="claude")
+        await client.load(dataset_path, namespace="swebench")
+        logger.info("  closures loaded")
 
         try:
-            # 2. Setup — dataset prepares environment
+            # 2. Setup — dataset returns instruction
             t = time.monotonic()
             agent_input = await client.call("swebench", "setup", {"instance": instance})
-            logger.info("  setup done (%.1fs): instruction=%s..., workdir=%s",
+            logger.info("  setup (%.1fs): %s...",
                         time.monotonic() - t,
-                        agent_input.get("instruction", "")[:60],
-                        agent_input.get("workdir", ""))
+                        agent_input.get("instruction", "")[:80])
 
             # 3. Run — agent executes
             t = time.monotonic()
             agent_output = await client.call("claude", "run", agent_input)
-            logger.info("  agent done (%.1fs): exit_code=%s",
+            logger.info("  agent (%.1fs): exit_code=%s, patch=%d chars",
                         time.monotonic() - t,
-                        agent_output.get("exit_code"))
+                        agent_output.get("exit_code"),
+                        len(agent_output.get("patch", "")))
 
-            # 4. Verify — dataset evaluates result
+            # 4. Verify — dataset evaluates
             t = time.monotonic()
-            verify_result = await client.call("swebench", "verify", {
+            verify_data = {
                 "instance": instance,
                 "agent_output": agent_output,
-            })
-            logger.info("  verify done (%.1fs): pass=%s, reason=%s",
+            }
+            if eval_script:
+                verify_data["eval_script"] = eval_script
+            verify_result = await client.call("swebench", "verify", verify_data)
+            logger.info("  verify (%.1fs): pass=%s, reason=%s",
                         time.monotonic() - t,
                         verify_result.get("pass"),
                         verify_result.get("reason", ""))
 
         finally:
-            # 5. Unload closures
             await client.unload("claude")
             await client.unload("swebench")
-            logger.info("  closures unloaded")
 
     # Write result
     result = {
-        "instance": instance,
+        "instance_id": instance.get("instance_id"),
         "agent_input": agent_input,
         "agent_output": agent_output,
         "verify": verify_result,
@@ -105,32 +101,23 @@ async def run_pipeline(
     output_path = Path(output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(result, indent=2, default=str))
-    logger.info("Result written to %s (%.1fs total)", output, time.monotonic() - t0)
-
-    return result
+    logger.info("Result → %s (%.1fs total)", output, time.monotonic() - t0)
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Run Claude Code on SWE-bench (closure protocol)")
-    parser.add_argument("--server", default="http://localhost:8000", help="Runtime server URL")
-    parser.add_argument("--agent", required=True, help="Path to agent closure dir")
-    parser.add_argument("--dataset", required=True, help="Path to dataset closure dir")
-    parser.add_argument("--instance-file", default=None, help="JSON file with SWE-bench instance")
+    parser = argparse.ArgumentParser(description="Run Claude Code on SWE-bench")
+    parser.add_argument("--server", default="http://localhost:8000")
+    parser.add_argument("--agent", required=True, help="Path to agent closure (e.g. ../Agentix-Agents-Hub/claude-code)")
+    parser.add_argument("--dataset", required=True, help="Path to dataset closure (e.g. ../Agentix-Datasets/swebench)")
+    parser.add_argument("--instance-file", required=True, help="JSON file with SWE-bench instance")
+    parser.add_argument("--eval-script", default=None, help="Path to eval.sh for verification")
     parser.add_argument("--output", default="result.json")
     args = parser.parse_args()
 
-    # Load instance data
-    if args.instance_file:
-        instance = json.loads(Path(args.instance_file).read_text())
-    else:
-        # Default stub instance for testing
-        instance = {
-            "instance_id": "test__test-001",
-            "problem_statement": "Fix the bug in the frobulator module",
-            "repo": "test/test",
-        }
+    instance = json.loads(Path(args.instance_file).read_text())
+    eval_script = Path(args.eval_script).read_text() if args.eval_script else None
 
-    asyncio.run(run_pipeline(args.server, args.agent, args.dataset, instance, args.output))
+    asyncio.run(run_pipeline(args.server, args.agent, args.dataset, instance, eval_script, args.output))
 
 
 if __name__ == "__main__":
