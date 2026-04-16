@@ -78,18 +78,17 @@ async def download(path: str):
 async def load_closure(request: Request):
     """Load a closure: spawn its process, register reverse proxy.
 
-    Body: {"path": "/nix/store/xxx", "namespace": "swebench", "env": {"KEY": "val"}}
+    Body: {"path": "/nix/store/xxx", "namespace": "swebench"}
     """
     body = await request.json()
     path = body.get("path")
     namespace = body.get("namespace")
-    env = body.get("env")
 
     if not path:
         raise HTTPException(status_code=400, detail="'path' is required")
 
     try:
-        name = await loader.load(path, namespace, env=env)
+        name = await loader.load(path, namespace)
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except TimeoutError as e:
