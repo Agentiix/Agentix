@@ -117,14 +117,22 @@ class RuntimeClient:
 
     # ── Closure management ──────────────────────────────────────
 
-    async def load(self, path: str, namespace: str | None = None) -> str:
+    async def load(self, path: str, namespace: str | None = None,
+                   env: dict[str, str] | None = None) -> str:
         """Load a closure into the runtime server.
+
+        Args:
+            path: Closure directory path
+            namespace: Endpoint namespace
+            env: Environment variables for the closure process
 
         Returns the namespace under which endpoints are available.
         """
         body = {"path": path}
         if namespace:
             body["namespace"] = namespace
+        if env:
+            body["env"] = env
 
         async def _do():
             r = await self._client.post("/load", json=body)

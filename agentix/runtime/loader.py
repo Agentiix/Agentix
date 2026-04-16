@@ -62,12 +62,14 @@ class ClosureLoader:
 
         raise FileNotFoundError(f"No executable found in {closure_path}")
 
-    async def load(self, path: str, namespace: str | None = None) -> str:
+    async def load(self, path: str, namespace: str | None = None,
+                   env: dict[str, str] | None = None) -> str:
         """Load a closure: spawn process, wait for socket.
 
         Args:
             path: Path to the closure directory (e.g. /nix/store/xxx)
             namespace: Optional namespace for endpoints (default: closure dir name)
+            env: Extra environment variables for the closure process
 
         Returns:
             The namespace under which endpoints are registered
@@ -95,6 +97,7 @@ class ClosureLoader:
             str(entry), "--socket", str(socket_path),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=env,
         )
 
         # Wait for socket to appear
