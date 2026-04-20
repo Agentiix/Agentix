@@ -1,181 +1,139 @@
-# Agentix 架构
+# Agentix Architecture (v0.1.0)
 
-## 定位
+## Scope
 
-Coding Agent SDK：run ANY agent on ANY environment, collect trajectories for training.
+v0.1.0 ships exactly three concerns:
 
-打包用 llm-agents.nix，Agentix 是上面的中间件层：plugin 协议 + trajectory 采集 + sandbox 接口。
+1. A **closure convention** — what a Docker image must contain to be consumable by Agentix.
+2. A **runtime server** — one process per sandbox that provides sandbox I/O and reverse-proxies to each closure.
+3. A **Docker deployment** — packages closures into named volumes, assembles sandboxes, starts the runtime.
 
-## 系统架构
+Higher-level abstractions (agent / dataset / benchmark interfaces) are deliberately **not** in this release; see [`ROADMAP.md`](../ROADMAP.md).
+
+## Components
 
 ```
-┌─ Host (Slime / Verl / 任意 orchestrator) ────────────────────┐
-│                                                                │
+┌─ Host (orchestrator) ─────────────────────────────────────────┐
 │  RuntimeClient                                                 │
-│  ├── exec("python -m agentix.eval --agent ... --dataset ...")  │
-│  ├── download("/output/result.json")                           │
-│  └── health() / upload() / exec()                              │
-│                                                                │
-│  不知道 agent 和 dataset 的细节                                  │
-│  只知道: 触发 eval, 拿结果                                      │
-│                                                                │
-└──────────────────────────┬─────────────────────────────────────┘
-                           │ HTTP
-                           ▼
-┌─ Sandbox ────────────────────────────────────────────────────────┐
-│                                                                   │
-│  agentix-server (:8000)          ← 纯管道, 不知道 agent/dataset   │
-│  ├── POST /exec                                                  │
-│  ├── POST /upload                                                │
-│  ├── GET  /download                                              │
-│  └── GET  /health                                                │
-│                                                                   │
-│  agentix.eval CLI                ← 编排逻辑                       │
-│  python -m agentix.eval --agent <plugin> --dataset <plugin>      │
-│  │                                                                │
-│  │  1. dataset.setup()          → agent_input                    │
-│  │  2. runner.run(agent_input)  → RunResult (output + trajectory)│
-│  │  3. dataset.verify()         → metrics                        │
-│  │  4. write /output/result.json                                 │
-│  │                                                                │
-│  ┌─ Agent Plugin ──────────┐  ┌─ Dataset Plugin ───────────────┐ │
-│  │ Nix closure             │  │ Nix closure                    │ │
-│  │ ├── bin/ (llm-agents)   │  │ └── dataset.py                 │ │
-│  │ └── runner.py           │  │     setup() → agent_input      │ │
-│  │     run(input) → Result │  │     verify() → metrics         │ │
-│  └─────────────────────────┘  └────────────────────────────────┘ │
-│                                                                   │
-│  Task Environment (Dockerfile)                                    │
-│                                                                   │
-└───────────────────────────────────────────────────────────────────┘
-
-Deployment 层 (Docker / K8s / Daytona / Modal)
-  create: 建沙箱 + 注入 runtime/agent/dataset closures + 启动 server
-  delete: 销毁
+│    • exec / upload / download / ls    (runtime built-ins)      │
+│    • closures / logs                   (introspection)         │
+│    • call(namespace, endpoint, data)   (any mounted closure)   │
+└──────────────────────────────┬─────────────────────────────────┘
+                               │ HTTP
+┌─ Sandbox ──────────────────────▼───────────────────────────────┐
+│                                                                 │
+│  agentix-server                                                 │
+│    built-in I/O:                                                │
+│      GET  /health                                               │
+│      POST /exec     (SSE or JSON)                               │
+│      POST /upload                                               │
+│      GET  /download, /ls                                        │
+│    closure introspection:                                       │
+│      GET  /closures, /closures/{ns}/logs                        │
+│    streaming reverse proxy:                                     │
+│      ANY  /{namespace}/{path*}                                  │
+│                                                                 │
+│  Closures (Unix sockets at /tmp/agentix/{ns}.sock):             │
+│    forked by the runtime at startup from each                   │
+│    /mnt/<ns>/entry/bin/start                                    │
+│                                                                 │
+│  /nix/store — tmpfs with a symlink forest merged from every     │
+│  /mnt/<ns>/store content-addressed directory                    │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
-## 三层分离
+Closures are fixed at sandbox creation. There is no dynamic `/load`; the runtime's lifespan scans `/mnt` and forks every closure it finds.
 
-| 层 | 关注 | 不关注 |
-|---|------|--------|
-| **Host** | 触发 eval, 拿结果, 重试/并发/聚合 | agent 怎么跑, dataset 怎么验证 |
-| **Sandbox** | exec/upload/download | eval 逻辑, plugin 内容 |
-| **Eval CLI** | setup → run → verify, 写 result.json | 自己在哪, 谁在调自己 |
+## Closure convention
 
-## 协议
+A closure is a Docker image that declares `VOLUME /nix` and carries:
 
-### Runtime Server (沙箱接口)
+- `/nix/store/<hash>-*/` — content-addressed Nix dependencies (the transitive closure)
+- `/nix/entry/bin/start` — executable entry point (no CLI args)
 
-纯管道。不知道 agent 和 dataset 是什么。
+The `start` binary reads `AGENTIX_SOCKET` from env and binds a local HTTP server on that Unix socket. It MAY expose a `GET /` manifest (used by the runtime loader for discovery; optional). Everything else — routes, request schemas, streaming semantics — is the closure's choice; the runtime just proxies bytes.
 
-```
-GET  /health              → {"status": "ok", "version": "0.1.0"}
-POST /exec                → {"exit_code": 0, "stdout": "...", "stderr": ""}
-POST /upload (multipart)  → {"path": "...", "size": 1024}
-GET  /download?path=...   → file content
-```
+See [`closure-protocol.md`](closure-protocol.md) for the full ABI.
 
-### Agent Plugin
-
-Nix closure = llm-agents.nix binary + runner.py
+## Sandbox layout
 
 ```
-agents/{name}/
-├── default.nix       # symlinkJoin(llm-agents binary + runner.py)
-└── runner.py         # 沙箱内执行
+/
+├── mnt/
+│   ├── runtime/       ← -v agentix-closure-<digest>:/mnt/runtime:ro
+│   │   ├── store/<hash>-*/
+│   │   └── entry/
+│   │       └── bin/start   ← the agentix-server binary
+│   └── <ns>/          ← one mount per closure, ro
+│       ├── store/<hash>-*/
+│       └── entry/
+│           └── bin/start
+│
+├── nix/
+│   └── store/         ← --tmpfs /nix (writable),
+│                        populated at entrypoint-time with
+│                        `ln -sfn /mnt/*/store/* /nix/store/`
+│
+└── (task image rootfs — /usr, /bin, /etc, /testbed, ...)
 ```
 
-runner.py:
-```python
-async def run(agent_input: dict) -> RunResult:
-    # RunResult = { output: dict, trajectory: Trajectory | None }
+Sandbox entrypoint (inlined into `docker run`):
+
+```sh
+set -e
+mkdir -p /nix/store
+for d in /mnt/*/store; do ln -sfn "$d"/* /nix/store/; done
+exec /mnt/runtime/entry/bin/start
 ```
 
-### Dataset Plugin
+Why the symlink forest: Nix binaries have `/nix/store/<hash>` hard-coded in shebangs and RPATH. They only work if `/nix/store/<hash>` resolves. Symlinking each closure's `store/<hash>` into a shared `/nix/store` merges them cheaply — content-addressed paths can't collide, and the task image sees one unified `/nix/store`.
 
-Nix closure = dataset.py + 任意资源
+## Environment & PATH policy
 
-```
-datasets/{name}/
-├── default.nix
-└── dataset.py        # 沙箱内执行
-```
+The runtime is a Nix-built binary, so `os.environ` is loaded with Nix-runtime paths (`LD_LIBRARY_PATH`, `FONTCONFIG_FILE`, `NIX_*`, etc.). Leaking those into subprocesses causes glibc/ABI mismatches with task-image binaries.
 
-dataset.py:
-```python
-async def setup() -> dict:     # 初始化环境, 返回 agent_input
-async def verify() -> dict:    # agent 跑完后, 采集 metrics
-```
+Rules at every `/exec` and closure fork:
 
-### Eval CLI
+1. **Strip Nix-host-only env vars** — `LD_LIBRARY_PATH`, `LD_PRELOAD`, `PYTHONPATH`, `PYTHONHOME`, `LOCALE_ARCHIVE`, `FONTCONFIG_*`, `SSL_CERT_FILE`, anything prefixed `NIX_`.
+2. **PATH defaults to the task image's default** (`/usr/local/bin:/usr/bin:/bin`). A closure's bundled `ripgrep`/`python`/`node` does **not** shadow the same names in the task image.
+3. **Closures invoke their own tools by absolute `/nix/store` path** — what well-formed Nix builds already produce via shebangs and wrappers.
 
-沙箱内命令，编排 setup → run → verify:
+When a closure is forked, PATH is prepended with `/mnt/<ns>/entry/bin` so the closure's own shell-outs resolve to its bundled tools first.
 
-```bash
-python -m agentix.eval --agent /opt/agent --dataset /opt/dataset --output /output/result.json
-```
+## Deployment (Docker)
 
-输出 result.json:
-```json
-{
-  "output": { ... },
-  "trajectory": { "schema_version": "ATIF-v1.4", "steps": [...], ... },
-  "metrics": { "reward": 1.0, "passed": true }
-}
-```
-
-### Deployment
-
-沙箱 CRUD:
-
-```python
-class Deployment(ABC):
-    async def create(self, config: SandboxConfig) -> SandboxInfo: ...
-    async def get(self, sandbox_id: str) -> SandboxInfo: ...
-    async def update(self, sandbox_id: str, config: SandboxConfig) -> SandboxInfo: ...
-    async def delete(self, sandbox_id: str) -> None: ...
-```
-
-SandboxConfig:
-```python
-class SandboxConfig(BaseModel):
-    task_image: str           # Dockerfile for environment
-    runtime_closure: str      # agentix-server
-    agent_closure: str        # agent plugin
-    dataset_closure: str      # dataset plugin (optional)
-```
-
-## 典型流程
+Per unique closure image (cached in process):
 
 ```
-Host                          Deployment              Sandbox
- │                                │                       │
- │  deployment.create(config) ───►│                       │
- │                                │── 建沙箱               │
- │                                │── 注入 closures ─────►│
- │                                │── 启动 agentix-server ►│ :8000
- │  ◄── SandboxInfo               │                       │
- │                                │                       │
- │  exec("python -m agentix.eval  │                       │
- │    --agent /opt/agent           ─────────────────────►│
- │    --dataset /opt/dataset")    │                       │
- │                                │         setup()       │
- │                                │         run()         │
- │                                │         verify()      │
- │  ◄── {"exit_code": 0}         │                       │
- │                                │                       │
- │  download("/output/result.json")─────────────────────►│
- │  ◄── {output, trajectory, metrics}                    │
- │                                │                       │
- │  deployment.delete(id) ───────►│── 销毁 ──────────────►│ ✗
+docker run --rm -v agentix-closure-<digest>:/nix <image> true
 ```
 
-## 版本管理
+Docker's volume-init-from-image rule auto-populates the named volume from the image's `/nix` layer on first attach; skips if already populated. The volume key is the image's SHA256 digest, so rebuilds produce a fresh volume automatically.
 
-| 需求 | 方案 |
-|------|------|
-| Agent 打包 | llm-agents.nix (40+ agents, 自动更新) |
-| Agent plugin | Nix wrap: llm-agents binary + runner.py |
-| Dataset plugin | Nix closure: dataset.py + resources |
-| 版本锁定 | flake.lock + git commit |
-| 分发 | Nix binary cache (S3) 或 tarball |
+Sandbox create:
+
+```
+docker run -d \
+  --name <sandbox-id> \
+  --network host \
+  -v agentix-closure-<runtime-digest>:/mnt/runtime:ro \
+  -v agentix-closure-<ns-digest>:/mnt/<ns>:ro   (per closure) \
+  --tmpfs /nix:exec,mode=755 \
+  -e AGENTIX_BIND_PORT=<port> \
+  <task-image> sh -c '<entrypoint>'
+```
+
+## Design decisions
+
+- **Unix sockets, not stdin/stdout** — no interleaving with logs; any HTTP stack works.
+- **HTTP, not gRPC** — curl-debuggable; any language can expose a server.
+- **Process per closure** — isolation, independent crashes, independent deps.
+- **Runtime forwards bytes verbatim** — closures own their wire schemas; streaming (SSE, chunked) works end-to-end.
+- **Static closure set per sandbox** — no dynamic `/load`/`/unload`; to change closures, recreate the sandbox.
+- **Built-in sandbox I/O on the runtime** — exec/upload/download/ls always available, one less closure to compose.
+
+## Non-goals
+
+- Bearer-token auth on the runtime (sandbox-level trust assumed).
+- Dynamic closure load/unload.
+- Higher-level interfaces for agents / datasets / benchmarks (deferred past v0.1.0).

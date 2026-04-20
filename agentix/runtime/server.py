@@ -1,146 +1,179 @@
 """Agentix runtime server.
 
-Pure sandbox interface + closure loading via Unix socket reverse proxy.
+The runtime server bundles:
+  - built-in operations (exec/upload/download/ls) mounted at root
+  - a closure loader + streaming reverse proxy for closures already mounted
+
+Closures are static per sandbox: the deployment has mounted each closure at
+`/mnt/<namespace>` before the runtime starts. On startup the runtime scans
+/mnt and forks every closure it finds with an entry/bin/start. There is
+no dynamic load/unload — sandbox contents are fixed at create time.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Form
-from fastapi.responses import JSONResponse, Response
+import httpx
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from agentix import __version__
-from agentix.models import ExecRequest, ExecResponse, HealthResponse, UploadResponse
-from agentix.runtime.executor import Executor
-from agentix.runtime.loader import ClosureLoader
+from agentix.models import HealthResponse, LogsResponse
+from agentix.runtime.builtins import router as builtins_router
+from agentix.runtime.loader import CLOSURE_MOUNT_ROOT, ClosureLoader
+
+_HTTPX_UNREACHABLE = (
+    httpx.ConnectError,
+    httpx.ReadError,
+    httpx.RemoteProtocolError,
+    httpx.TransportError,
+)
 
 logger = logging.getLogger("agentix.runtime")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message)s")
 
 loader = ClosureLoader()
-executor = Executor()
+
+
+async def _auto_load() -> None:
+    """Scan /mnt for mounted closures and fork each one.
+
+    The runtime itself is mounted at /mnt/runtime; skip it. Any other
+    /mnt/<ns>/entry/bin/start is a closure the deployment arranged, and
+    should be running. Failure here surfaces as a sandbox startup failure.
+    """
+    if not CLOSURE_MOUNT_ROOT.is_dir():
+        return
+    for ns_dir in sorted(CLOSURE_MOUNT_ROOT.iterdir()):
+        if ns_dir.name == "runtime" or not ns_dir.is_dir():
+            continue
+        start = ns_dir / "entry" / "bin" / "start"
+        if not (start.exists() and os.access(start, os.X_OK)):
+            continue
+        await loader.load(ns_dir.name)
+        logger.info("Auto-loaded closure '%s'", ns_dir.name)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    await _auto_load()
     yield
     await loader.shutdown()
 
 
 app = FastAPI(title="agentix", version=__version__, lifespan=lifespan)
+app.state.loader = loader
+app.include_router(builtins_router)
 
 
-# ── Core endpoints ──────────────────────────────────────────────
+# ── Health ───────────────────────────────────────────────────────
 
 
 @app.get("/health", response_model=HealthResponse)
-async def health():
+async def health() -> HealthResponse:
     return HealthResponse(version=__version__)
 
 
-@app.post("/exec", response_model=ExecResponse)
-async def exec_command(req: ExecRequest):
-    exit_code, stdout, stderr = await executor.exec(
-        command=req.command,
-        timeout=req.timeout,
-        cwd=req.cwd,
-        extra_env=req.env,
-        max_output=req.max_output,
-    )
-    return ExecResponse(exit_code=exit_code, stdout=stdout, stderr=stderr)
-
-
-@app.post("/upload", response_model=UploadResponse)
-async def upload(
-    file: UploadFile = File(...),
-    path: str = Form(...),
-):
-    data = await file.read()
-    size = executor.upload(data, path)
-    return UploadResponse(path=path, size=size)
-
-
-@app.get("/download")
-async def download(path: str):
-    try:
-        data = executor.download(path)
-    except FileNotFoundError:
-        raise HTTPException(status_code=404, detail=f"Not found: {path}")
-    return Response(content=data, media_type="application/octet-stream")
-
-
-# ── Closure management ──────────────────────────────────────────
-
-
-@app.post("/load")
-async def load_closure(request: Request):
-    """Load a closure: spawn its process, register reverse proxy.
-
-    Body: {"path": "/nix/store/xxx", "namespace": "swebench"}
-    """
-    body = await request.json()
-    path = body.get("path")
-    namespace = body.get("namespace")
-
-    if not path:
-        raise HTTPException(status_code=400, detail="'path' is required")
-
-    try:
-        name = await loader.load(path, namespace)
-    except FileNotFoundError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    except TimeoutError as e:
-        raise HTTPException(status_code=504, detail=str(e))
-
-    return {"status": "loaded", "namespace": name}
-
-
-@app.post("/unload")
-async def unload_closure(request: Request):
-    """Unload a closure: stop its process, remove proxy.
-
-    Body: {"namespace": "swebench"}
-    """
-    body = await request.json()
-    name = body.get("namespace")
-    if not name:
-        raise HTTPException(status_code=400, detail="'namespace' is required")
-    await loader.unload(name)
-    return {"status": "unloaded", "namespace": name}
+# ── Closure introspection ───────────────────────────────────────
 
 
 @app.get("/closures")
 async def list_closures():
-    """List all loaded closures."""
-    return await loader.list_closures()
+    return [c.model_dump() for c in loader.list_closures()]
 
 
-# ── Closure reverse proxy (catch-all) ──────────────────────────
-
-
-@app.api_route("/{namespace}/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
-async def proxy_to_closure(namespace: str, path: str, request: Request):
-    """Reverse proxy: /{namespace}/{path} → closure's Unix socket."""
-    body = await request.body()
-
+@app.get("/closures/{namespace}/logs", response_model=LogsResponse)
+async def closure_logs(namespace: str, tail: int | None = None) -> LogsResponse:
     try:
-        resp = await loader.proxy(
-            name=namespace,
-            path=f"/{path}",
-            method=request.method,
-            body=body if body else None,
-            headers=dict(request.headers),
-        )
+        stdout, stderr = loader.logs(namespace, tail=tail)
     except KeyError:
         raise HTTPException(status_code=404, detail=f"Closure '{namespace}' not loaded")
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Closure error: {e}")
+    return LogsResponse(namespace=namespace, stdout=stdout, stderr=stderr)
 
-    return Response(
-        content=resp.content,
-        status_code=resp.status_code,
-        headers=dict(resp.headers),
-        media_type=resp.headers.get("content-type"),
+
+# ── Reverse proxy (catch-all) ────────────────────────────────────
+
+
+@app.api_route(
+    "/{namespace}/{path:path}",
+    methods=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"],
+)
+async def proxy_to_closure(namespace: str, path: str, request: Request):
+    """Streaming reverse proxy: /{namespace}/{path} → closure's Unix socket."""
+    try:
+        body = await request.body()
+        status, headers, iterator, closer = await loader.proxy_stream(
+            name=namespace,
+            method=request.method,
+            path=f"/{path}",
+            headers=dict(request.headers),
+            body=body if body else None,
+            query=request.url.query or None,
+        )
+    except KeyError:
+        return JSONResponse(
+            status_code=502,
+            content={"error": "closure not loaded", "namespace": namespace},
+        )
+    except _HTTPX_UNREACHABLE as exc:
+        return JSONResponse(
+            status_code=502,
+            content={"error": f"closure unreachable: {exc}", "namespace": namespace},
+        )
+
+    async def _stream():
+        try:
+            async for chunk in iterator:
+                yield chunk
+        finally:
+            await closer()
+
+    return StreamingResponse(
+        _stream(),
+        status_code=status,
+        headers=headers,
+        media_type=headers.get("content-type"),
     )
+
+
+# ── Entry point (invoked as /mnt/runtime/entry/bin/start) ─────
+
+
+def main() -> None:
+    """Entry point the closure convention expects at
+    /mnt/runtime/entry/bin/start. Port via AGENTIX_BIND_PORT (env, default
+    8000); dev shell can override via --port.
+    """
+    import argparse
+
+    import uvicorn
+
+    parser = argparse.ArgumentParser(description="agentix runtime server")
+    parser.add_argument("--host", default="0.0.0.0")
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=int(os.environ.get("AGENTIX_BIND_PORT", "8000")),
+    )
+    parser.add_argument("--debug", action="store_true")
+    parser.add_argument("--debug-port", type=int, default=5678)
+    parser.add_argument("--debug-wait", action="store_true")
+    args = parser.parse_args()
+
+    if args.debug:
+        import debugpy
+
+        debugpy.listen(("0.0.0.0", args.debug_port))
+        print(f"debugpy listening on 0.0.0.0:{args.debug_port}")
+        if args.debug_wait:
+            print("Waiting for debugger to attach...")
+            debugpy.wait_for_client()
+
+    uvicorn.run("agentix.runtime.server:app", host=args.host, port=args.port)
+
+
+if __name__ == "__main__":
+    main()

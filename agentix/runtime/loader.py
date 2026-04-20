@@ -1,204 +1,337 @@
-"""Closure loader: spawn closure processes, reverse proxy via Unix socket.
+"""Closure loader: spawn closure processes, reverse-proxy via Unix socket.
 
-A closure is any executable that accepts --socket <path> and starts
-an HTTP server on that Unix socket. The loader manages the lifecycle
-and provides a reverse proxy function for the runtime server.
+Each closure image is mounted at `/mnt/<namespace>` in the sandbox and
+carries `/mnt/<namespace>/store/...` (Nix deps) and
+`/mnt/<namespace>/entry/...` (derivation root — bin/lib/etc tree).
+
+Loading a closure is: fork `/mnt/<namespace>/entry/bin/start` with
+PATH prefixed by `/mnt/<namespace>/entry/bin` and a socket path
+passed via env. The loader owns the process lifecycle, a bounded
+stdout/stderr ring buffer, and the HTTP client used by the server's
+reverse proxy.
 """
 
 from __future__ import annotations
 
 import asyncio
+import collections
 import logging
 import os
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import httpx
+from pydantic import ValidationError
+
+from agentix.models import ClosureInfo, ClosureManifest
 
 logger = logging.getLogger("agentix.runtime.loader")
 
 SOCKET_DIR = Path(os.environ.get("AGENTIX_SOCKET_DIR", "/tmp/agentix"))
+CLOSURE_MOUNT_ROOT = Path(os.environ.get("AGENTIX_CLOSURE_MOUNT_ROOT", "/mnt"))
+LOG_BUFFER_BYTES = int(os.environ.get("AGENTIX_LOG_BUFFER_BYTES", str(1 * 1024 * 1024)))  # 1 MiB per stream
+
+# Env vars scrubbed before forking a closure subprocess. The runtime is a
+# Nix-built binary, so os.environ is pre-loaded with Nix-runtime paths that
+# would ABI-clash with binaries under /mnt/<ns>/entry/bin.
+_RUNTIME_ONLY_ENV = {
+    "LD_LIBRARY_PATH",
+    "LD_PRELOAD",
+    "PYTHONPATH",
+    "PYTHONHOME",
+    "LOCALE_ARCHIVE",
+    "FONTCONFIG_FILE",
+    "FONTCONFIG_PATH",
+    "SSL_CERT_FILE",
+    "NIX_SSL_CERT_FILE",
+}
+
+
+def _scrubbed_env(extra: dict[str, str] | None = None) -> dict[str, str]:
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if k not in _RUNTIME_ONLY_ENV and not k.startswith("NIX_")
+    }
+    if extra:
+        env.update(extra)
+    return env
+
+
+class _RingBuffer:
+    """Bounded byte ring buffer backed by a deque of chunks."""
+
+    def __init__(self, max_bytes: int):
+        self._max = max_bytes
+        self._chunks: collections.deque[bytes] = collections.deque()
+        self._size = 0
+
+    def write(self, data: bytes) -> None:
+        if not data:
+            return
+        self._chunks.append(data)
+        self._size += len(data)
+        while self._size > self._max and self._chunks:
+            drop = self._chunks.popleft()
+            self._size -= len(drop)
+            slack = self._max - self._size
+            if slack > 0 and drop:
+                keep = drop[-slack:]
+                self._chunks.appendleft(keep)
+                self._size += len(keep)
+
+    def tail(self, n: int | None = None) -> bytes:
+        if n is None or n >= self._size:
+            return b"".join(self._chunks)
+        # Walk chunks from the right, stop once we have >= n bytes,
+        # so a small-tail read doesn't materialize the whole buffer.
+        collected: list[bytes] = []
+        remaining = n
+        for chunk in reversed(self._chunks):
+            if len(chunk) >= remaining:
+                collected.append(chunk[-remaining:])
+                break
+            collected.append(chunk)
+            remaining -= len(chunk)
+        return b"".join(reversed(collected))
 
 
 @dataclass
 class LoadedClosure:
-    """A running closure process."""
     name: str
     path: Path
     socket_path: Path
     process: asyncio.subprocess.Process
     client: httpx.AsyncClient
-    manifest: dict = field(default_factory=dict)  # endpoint descriptions from GET /
+    manifest: ClosureManifest | None = None
+    stdout_buf: _RingBuffer = field(default_factory=lambda: _RingBuffer(LOG_BUFFER_BYTES))
+    stderr_buf: _RingBuffer = field(default_factory=lambda: _RingBuffer(LOG_BUFFER_BYTES))
+    _log_tasks: list[asyncio.Task] = field(default_factory=list)
 
 
 class ClosureLoader:
-    """Manages closure lifecycles: load, proxy, unload."""
+    """Manages closure lifecycles: load, proxy, logs, unload."""
 
     def __init__(self):
         self._closures: dict[str, LoadedClosure] = {}
         SOCKET_DIR.mkdir(parents=True, exist_ok=True)
 
-    def _find_entry(self, closure_path: Path) -> Path:
-        """Find the executable entry point in a closure directory."""
-        # Convention: look for 'serve' or 'main' or the first executable
-        for name in ("serve", "main"):
-            candidate = closure_path / name
-            if candidate.exists() and os.access(candidate, os.X_OK):
-                return candidate
-            candidate = closure_path / "bin" / name
-            if candidate.exists() and os.access(candidate, os.X_OK):
-                return candidate
+    # ── load / unload ────────────────────────────────────────────
 
-        # Fallback: first executable in bin/
-        bin_dir = closure_path / "bin"
-        if bin_dir.is_dir():
-            for f in sorted(bin_dir.iterdir()):
-                if f.is_file() and os.access(f, os.X_OK):
-                    return f
+    async def load(self, namespace: str) -> LoadedClosure:
+        """Spawn a closure process from /mnt/<namespace>/entry/bin/start.
 
-        # Fallback: first executable in root
-        for f in sorted(closure_path.iterdir()):
-            if f.is_file() and os.access(f, os.X_OK):
-                return f
-
-        raise FileNotFoundError(f"No executable found in {closure_path}")
-
-    async def load(self, path: str, namespace: str | None = None) -> str:
-        """Load a closure: spawn process, wait for socket.
-
-        Args:
-            path: Path to the closure directory (e.g. /nix/store/xxx)
-            namespace: Optional namespace for endpoints (default: closure dir name)
-
-        Returns:
-            The namespace under which endpoints are registered
+        The deployment has mounted the closure's /nix volume at
+        `/mnt/<namespace>`. The loader finds the start binary, prepends
+        the entry dir's bin to PATH, hands the socket path via env, and forks.
         """
-        closure_path = Path(path)
-        if not closure_path.is_dir():
-            raise FileNotFoundError(f"Closure not found: {path}")
+        if namespace in self._closures:
+            logger.warning("Closure '%s' already loaded, unloading first", namespace)
+            await self.unload(namespace)
 
-        name = namespace or closure_path.name
-        if name in self._closures:
-            logger.warning("Closure '%s' already loaded, unloading first", name)
-            await self.unload(name)
+        mount = CLOSURE_MOUNT_ROOT / namespace
+        entry = mount / "entry"
+        start_bin = entry / "bin" / "start"
+        if not start_bin.exists() or not os.access(start_bin, os.X_OK):
+            raise FileNotFoundError(
+                f"No executable at {start_bin}. Deployment must mount the closure at {mount} "
+                f"with an entry/bin/start before it starts."
+            )
 
-        entry = self._find_entry(closure_path)
-        socket_path = SOCKET_DIR / f"{name}.sock"
-
-        # Remove stale socket
+        socket_path = SOCKET_DIR / f"{namespace}.sock"
         if socket_path.exists():
             socket_path.unlink()
 
-        # Spawn the closure process
-        # Closures are self-contained: they bundle their own Python + deps.
-        logger.info("Loading closure '%s' from %s (entry=%s)", name, path, entry)
+        # Closure convention: service is callable with no CLI args; it reads
+        # AGENTIX_SOCKET from env. PATH is prepped with the closure's own
+        # bin/ first, so the service's shell-outs (git, rg, node, ...)
+        # resolve to its bundled tools.
+        base_path = os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin")
+        env = _scrubbed_env({
+            "PATH": f"{entry}/bin:{base_path}",
+            "AGENTIX_SOCKET": str(socket_path),
+        })
+
+        logger.info("Loading closure '%s' (start=%s)", namespace, start_bin)
         proc = await asyncio.create_subprocess_exec(
-            str(entry), "--socket", str(socket_path),
+            str(start_bin),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=env,
         )
 
-        # Wait for socket to appear
-        for _ in range(100):  # 10 seconds max
+        closure = LoadedClosure(
+            name=namespace,
+            path=mount,
+            socket_path=socket_path,
+            process=proc,
+            client=None,  # set below
+        )
+
+        async def _drain(stream: asyncio.StreamReader, buf: _RingBuffer, tag: str) -> None:
+            try:
+                while True:
+                    chunk = await stream.read(8192)
+                    if not chunk:
+                        break
+                    buf.write(chunk)
+            except Exception as exc:  # pragma: no cover - best effort
+                logger.debug("log drain (%s/%s) ended: %s", namespace, tag, exc)
+
+        closure._log_tasks.append(asyncio.create_task(_drain(proc.stdout, closure.stdout_buf, "stdout")))
+        closure._log_tasks.append(asyncio.create_task(_drain(proc.stderr, closure.stderr_buf, "stderr")))
+
+        # Wait for the socket to appear
+        for _ in range(100):  # ~10s
             if socket_path.exists():
                 break
+            if proc.returncode is not None:
+                await self._cleanup(closure)
+                raise RuntimeError(
+                    f"Closure '{namespace}' exited before creating socket: "
+                    f"stderr={closure.stderr_buf.tail(2048).decode(errors='replace')}"
+                )
             await asyncio.sleep(0.1)
         else:
-            proc.kill()
-            await proc.communicate()
-            raise TimeoutError(f"Closure '{name}' did not create socket within 10s")
+            await self._cleanup(closure)
+            raise TimeoutError(f"Closure '{namespace}' did not create socket within 10s")
 
-        # Create HTTP client over Unix socket
         transport = httpx.AsyncHTTPTransport(uds=str(socket_path))
-        client = httpx.AsyncClient(transport=transport, base_url="http://closure", timeout=300)
+        closure.client = httpx.AsyncClient(transport=transport, base_url="http://closure", timeout=None)
 
-        # Health check + reflection: GET / returns closure manifest
-        manifest = {}
-        for _ in range(50):  # 5 seconds max
+        # Manifest probe (also a readiness check)
+        manifest_raw: dict | None = None
+        for _ in range(50):  # ~5s
             try:
-                r = await client.get("/")
+                r = await closure.client.get("/")
                 if r.status_code < 500:
                     try:
-                        manifest = r.json()
+                        manifest_raw = r.json()
                     except Exception:
-                        manifest = {"status": "ok"}
+                        manifest_raw = None
                     break
             except (httpx.ConnectError, httpx.ReadError):
                 await asyncio.sleep(0.1)
         else:
-            proc.kill()
-            await proc.communicate()
-            await client.aclose()
-            raise TimeoutError(f"Closure '{name}' not responding on socket")
+            await self._cleanup(closure)
+            raise TimeoutError(f"Closure '{namespace}' not responding on socket")
 
-        self._closures[name] = LoadedClosure(
-            name=name, path=closure_path,
-            socket_path=socket_path, process=proc, client=client,
-            manifest=manifest,
-        )
-        logger.info("Closure '%s' loaded (manifest=%s)", name, manifest)
-        return name
+        if isinstance(manifest_raw, dict):
+            try:
+                closure.manifest = ClosureManifest.model_validate(manifest_raw)
+            except ValidationError as exc:
+                logger.warning("Closure '%s' manifest failed validation (kept as-is): %s", namespace, exc)
+                closure.manifest = ClosureManifest(
+                    name=manifest_raw.get("name", namespace),
+                    version=manifest_raw.get("version", "0.0.0"),
+                    description=manifest_raw.get("description"),
+                    kind=manifest_raw.get("kind"),
+                )
+
+        self._closures[namespace] = closure
+        logger.info("Closure '%s' loaded (manifest=%s)", namespace, closure.manifest)
+        return closure
 
     async def unload(self, name: str) -> None:
-        """Stop a closure process and clean up."""
         closure = self._closures.pop(name, None)
         if not closure:
             return
-
         logger.info("Unloading closure '%s'", name)
-        await closure.client.aclose()
-        closure.process.terminate()
-        try:
-            await asyncio.wait_for(closure.process.communicate(), timeout=5)
-        except asyncio.TimeoutError:
-            closure.process.kill()
-            await closure.process.communicate()
+        await self._cleanup(closure)
 
+    async def _cleanup(self, closure: LoadedClosure) -> None:
+        if closure.client is not None:
+            try:
+                await closure.client.aclose()
+            except Exception:  # pragma: no cover
+                pass
+        if closure.process.returncode is None:
+            closure.process.terminate()
+            try:
+                await asyncio.wait_for(closure.process.wait(), timeout=5)
+            except TimeoutError:
+                closure.process.kill()
+                await closure.process.wait()
+        for t in closure._log_tasks:
+            t.cancel()
+        await asyncio.gather(*closure._log_tasks, return_exceptions=True)
         if closure.socket_path.exists():
-            closure.socket_path.unlink()
+            try:
+                closure.socket_path.unlink()
+            except FileNotFoundError:
+                pass
 
-    async def proxy(self, name: str, path: str, method: str,
-                    body: bytes | None = None, headers: dict | None = None) -> httpx.Response:
-        """Forward a request to a loaded closure.
+    # ── proxy ────────────────────────────────────────────────────
 
-        Args:
-            name: Closure namespace
-            path: Request path (e.g. /setup)
-            method: HTTP method
-            body: Request body
-            headers: Request headers
-
-        Returns:
-            Response from the closure
-        """
+    def get(self, name: str) -> LoadedClosure:
         closure = self._closures.get(name)
         if not closure:
             raise KeyError(f"Closure not loaded: {name}")
+        return closure
 
-        r = await closure.client.request(
-            method=method,
-            url=path,
-            content=body,
-            headers={k: v for k, v in (headers or {}).items()
-                     if k.lower() not in ("host", "transfer-encoding")},
+    async def proxy_stream(
+        self,
+        name: str,
+        method: str,
+        path: str,
+        headers: dict,
+        body: bytes | None,
+        query: str | None = None,
+    ) -> tuple[int, dict[str, str], AsyncIterator[bytes], Any]:
+        """Forward a request and return (status, headers, byte_iterator, closer).
+
+        The caller must `await closer()` once it's done streaming.
+        """
+        closure = self.get(name)
+        url = path + (f"?{query}" if query else "")
+        forwarded_headers = {
+            k: v
+            for k, v in headers.items()
+            if k.lower() not in {"host", "transfer-encoding", "content-length"}
+        }
+
+        req = closure.client.build_request(
+            method=method, url=url, content=body, headers=forwarded_headers
         )
-        return r
+        resp = await closure.client.send(req, stream=True)
 
-    async def list_closures(self) -> list[dict]:
-        """List all loaded closures with their manifests."""
-        result = []
-        for name, c in self._closures.items():
-            result.append({
-                "name": name,
-                "path": str(c.path),
-                "pid": c.process.pid,
-                "socket": str(c.socket_path),
-                "manifest": c.manifest,
-            })
-        return result
+        async def _iter() -> AsyncIterator[bytes]:
+            async for chunk in resp.aiter_raw():
+                yield chunk
+
+        async def _close() -> None:
+            await resp.aclose()
+
+        # Strip hop-by-hop headers from response
+        out_headers = {
+            k: v
+            for k, v in resp.headers.items()
+            if k.lower() not in {"transfer-encoding", "content-encoding", "content-length"}
+        }
+        return resp.status_code, out_headers, _iter(), _close
+
+    # ── logs & listing ───────────────────────────────────────────
+
+    def logs(self, name: str, tail: int | None = None) -> tuple[str, str]:
+        closure = self.get(name)
+        stdout = closure.stdout_buf.tail(tail).decode(errors="replace")
+        stderr = closure.stderr_buf.tail(tail).decode(errors="replace")
+        return stdout, stderr
+
+    def list_closures(self) -> list[ClosureInfo]:
+        return [
+            ClosureInfo(
+                name=name,
+                path=str(c.path),
+                pid=c.process.pid,
+                socket=str(c.socket_path),
+                manifest=c.manifest,
+            )
+            for name, c in self._closures.items()
+        ]
 
     async def shutdown(self) -> None:
-        """Unload all closures."""
-        names = list(self._closures.keys())
-        for name in names:
+        for name in list(self._closures.keys()):
             await self.unload(name)

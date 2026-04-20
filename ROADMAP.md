@@ -1,66 +1,21 @@
 # Roadmap
 
-## Phase 0: Agent Evaluation (Current)
+## v0.1.0 — Closure runtime (current)
 
-Run any agent on any benchmark, collect results.
+Run any Nix closure inside a Docker sandbox, compose multiple closures in one sandbox, expose each over HTTP via a reverse proxy.
 
-- [x] Runtime server: /exec, /upload, /download, /health
-- [x] Agent adapter protocol: AgentInput → AgentOutput
-- [x] Nix closure packaging (binary + adapter)
-- [x] Docker deployment with sandbox lifecycle
-- [x] SWE-bench Verified runner
-- [ ] Run claude-code on SWE-bench Verified end-to-end
-- [ ] Add more agents: aider, codex, swe-agent, openhands
-- [ ] Add more benchmarks: HumanEval, MBPP, Polyglot
+- [x] Closure ABI: `VOLUME /nix` + `/nix/store` + `/nix/entry/bin/start`
+- [x] `DockerDeployment` — per-image named volume keyed by image digest, auto-populated by Docker; per-closure `-v /mnt/<ns>:ro` + tmpfs `/nix`; sandbox entrypoint builds the `/nix/store` symlink forest and execs the runtime
+- [x] Runtime server — built-in `exec / upload / download / ls`, `/closures`, streaming reverse proxy `/{ns}/{path*}`
+- [x] Auto-load on startup: runtime scans `/mnt` and forks each closure's `entry/bin/start` (no dynamic `/load`)
+- [x] Unit tests + Docker smoke test in CI
 
-## Phase 1: LLM Proxy
+Higher-level concepts (agent adapter, dataset runner, benchmark orchestration) are **explicitly out of scope for v0.1.0** and will be revisited once the closure substrate is stable.
 
-Transparent proxy between agent and LLM API. Captures every token in and out — full trajectory tracing without modifying agent code.
+## Unscheduled
 
-```
-Agent binary → LLM Proxy (localhost:9000) → Real LLM API
-                    │
-                    └── trajectory.jsonl
-                        ├── request: model, messages, tools
-                        ├── response: content, tool_calls, usage
-                        └── timing: latency, ttft
-```
+Future directions, listed so the closure layer is built with them in mind — no committed timelines.
 
-**Why:** Most agents are blackbox binaries. We can't instrument their code, but we can intercept their API calls. Set `ANTHROPIC_BASE_URL=http://localhost:9000` and the proxy captures everything.
-
-**Key features:**
-- Token-level input/output logging
-- Cost tracking (prompt + completion tokens per step)
-- Latency profiling (time-to-first-token, total)
-- Multi-provider: Anthropic, OpenAI, compatible APIs
-- Zero agent modification — just env var override
-
-**Enables:**
-- Detailed trajectory collection for RL training data
-- Cost analysis across agents and benchmarks
-- Debugging agent behavior step-by-step
-
-## Phase 2: Advanced Algorithms — Partial Rollout
-
-Use trajectory data from Phase 1 to enable search and RL algorithms over agent execution traces.
-
-**Partial Rollout:** Instead of running an agent from scratch each time, fork execution at any step and explore alternative continuations.
-
-```
-Step 0 → Step 1 → Step 2 → Step 3 (fail)
-                      │
-                      └──→ Step 2' → Step 3' (success)  ← forked here
-```
-
-**Key features:**
-- Checkpoint agent state at any step (filesystem + git state)
-- Fork sandbox: snapshot → clone → resume with modified context
-- Tree search: explore multiple continuations in parallel
-- Reward signal: use test results to score branches
-- Best-of-N: run N rollouts from a checkpoint, pick the best
-
-**Enables:**
-- MCTS / beam search over agent trajectories
-- RL fine-tuning with step-level reward signals
-- Failure recovery without full restart
-- Efficient exploration of solution space
+- **LLM proxy** — transparent proxy that intercepts API calls from closures for token-level trajectory capture, cost tracking, replay.
+- **Checkpoint / partial rollout** — snapshot a sandbox (filesystem + loaded closure state), fork to explore alternative continuations; enables tree search / RL over execution traces.
+- **K8s deployment backend** — parallel `Deployment` implementation using the same closure image contract.

@@ -2,223 +2,88 @@
 
 ## Prerequisites
 
-- [Nix](https://nixos.org/download/)
-- [Docker](https://docs.docker.com/get-docker/)
-- [direnv](https://direnv.net/) (recommended)
-
-### One-time Nix setup
-
-```bash
-# Enable flakes
-mkdir -p ~/.config/nix
-echo "experimental-features = nix-command flakes" >> ~/.config/nix/nix.conf
-
-# (Optional) Add GitHub token to avoid rate limiting
-echo "access-tokens = github.com=ghp_your_token" >> ~/.config/nix/nix.conf
-```
+- Python 3.11+
+- [Docker](https://docs.docker.com/get-docker/) — the only host requirement. Nix runs inside the builder stage of `templates/closure-docker/Dockerfile`.
 
 ## Setup
 
-### Option A: direnv (recommended)
-
 ```bash
-direnv allow    # auto-loads nix dev shell when you cd into the project
+git clone https://github.com/Agentiix/Agentix.git
+cd Agentix
+pip install -e '.[dev]'        # fastapi, uvicorn, httpx, pytest, ruff
 ```
-
-### Option B: manual
-
-```bash
-nix develop     # enter dev shell
-```
-
-Both give you Python 3.12, ruff, pytest, all runtime deps, docker, node.
-
-## Editor Setup
-
-### VSCode
-
-Install two extensions:
-
-1. **Nix IDE** (`jnoortheen.nix-ide`) — `.nix` syntax support
-2. **direnv** (`mkhl.direnv`) — auto-loads Nix dev shell environment
-
-That's it. With direnv, VSCode automatically picks up the correct Python interpreter, ruff, and all tools. No manual interpreter path config needed.
-
-### Other editors
-
-Any editor with direnv support works the same way:
-
-- **Neovim**: [direnv.vim](https://github.com/direnv/direnv.vim)
-- **Emacs**: [envrc](https://github.com/purcell/envrc)
-- **JetBrains**: [Direnv integration plugin](https://plugins.jetbrains.com/plugin/15285-direnv-integration)
-
-Without direnv, run `nix develop` in your terminal and launch the editor from there.
-
-## Dev Shell
-
-`nix develop` / direnv gives you:
-
-| Tool | Purpose |
-|------|---------|
-| python 3.12 | Runtime + all deps (fastapi, uvicorn, pydantic, httpx) |
-| ruff | Linter + formatter |
-| pytest | Testing |
-| docker | Container runtime |
-| node 22 | For npm-based agent builds |
 
 ## Daily Workflow
 
-### Run runtime server locally
+### Run the runtime server locally (no sandbox)
 
 ```bash
-python -m agentix
-# Server at http://localhost:8000
+agentix-server                 # http://localhost:8000
+agentix-server --port 9000
 ```
 
-### Run in Docker (with agent)
+Without any closures mounted, the server exposes its built-ins (`/health`, `/exec`, `/upload`, `/download`, `/ls`). Useful for iterating on the runtime without the Docker round-trip.
+
+### Build closures
+
+Every image — runtime and closures — builds with the same template:
 
 ```bash
-RUNTIME=$(nix-build runtime/default.nix --no-out-link)
-AGENT=$(nix-build agents/claude-code/default.nix --no-out-link)
-
-docker run -d --name agentix-dev \
-  -v /nix/store:/nix/store:ro \
-  -e "PATH=${AGENT}/bin:${RUNTIME}/bin:/usr/bin:/bin" \
-  -p 8000:8000 \
-  ubuntu:24.04 \
-  $RUNTIME/bin/agentix-server
-
-# Test
-curl http://localhost:8000/health
-curl -X POST http://localhost:8000/exec \
-  -H "Content-Type: application/json" \
-  -d '{"command": "claude --version"}'
-
-# Cleanup
-docker rm -f agentix-dev
+docker build -t agentix/runtime:dev      -f templates/closure-docker/Dockerfile .
+docker build -t agentix/mock-agent:dev   -f templates/closure-docker/Dockerfile tests/closures/mock-agent
+docker build -t agentix/mock-dataset:dev -f templates/closure-docker/Dockerfile tests/closures/mock-dataset
 ```
 
-### Lint & Format
+### Smoke-test end-to-end in Docker
+
+```python
+import asyncio
+from agentix.deployment.docker import DockerDeployment
+from agentix.models import SandboxConfig
+from agentix.runtime.client import RuntimeClient
+
+async def main():
+    async with DockerDeployment() as d:
+        sb = await d.create(SandboxConfig(
+            image="ubuntu:24.04",
+            runtime="agentix/runtime:dev",
+            closures={"agent": "agentix/mock-agent:dev"},
+        ))
+        async with RuntimeClient(sb.runtime_url) as c:
+            print(await c.exec("uname -a"))
+            print(await c.call("agent", "run", {"instruction": "hi"}))
+
+asyncio.run(main())
+```
+
+`tests/smoke_docker.py` is the canonical end-to-end script — the CI `e2e` job runs it.
+
+### Lint & test
 
 ```bash
-ruff check runtime/          # lint
-ruff check runtime/ --fix    # lint + auto-fix
-ruff format runtime/         # format
+ruff check agentix/ tests/
+pytest                      # unit tests
+pytest -x                   # stop on first failure
 ```
 
-### Test
+## Adding a new closure
+
+Everything inside the sandbox is a closure. Copy a reference:
 
 ```bash
-pytest                        # all tests
-pytest -x                     # stop on first failure
-pytest -k "test_exec"         # run specific test
+cp -r tests/closures/mock-agent my-closure
+# edit my-closure/default.nix and the source package for your logic
+docker build -t my-closure:0.1.0 -f templates/closure-docker/Dockerfile ./my-closure
 ```
 
-### Build Nix packages
+Use it:
 
-```bash
-nix build .#runtime           # runtime closure
-nix build .#claude-code       # agent closure
+```python
+SandboxConfig(
+    image="ubuntu:24.04",
+    runtime="agentix/runtime:dev",
+    closures={"mine": "my-closure:0.1.0"},
+)
 ```
 
-## Debugging
-
-agentix-server 内置 debugpy 支持，与部署方式无关（Docker、K8s、Daytona、Modal 都一样）。
-
-### 原理
-
-```
-IDE (VSCode/PyCharm/...)
-  │
-  │  DAP protocol over TCP
-  │
-  ▼
-sandbox:5678  ← debugpy (agentix-server 内置)
-sandbox:8000  ← agentix-server HTTP API
-```
-
-agentix-server 启动时加 `--debug` 就会启动 debugpy 监听。Deployment 层只需要多暴露 5678 端口。
-
-### 启动 debug 模式
-
-```bash
-# 沙箱内 (不管是什么 deployment)
-agentix-server --debug                    # debugpy 在 5678 监听
-agentix-server --debug --debug-wait       # 等 IDE attach 后才启动
-agentix-server --debug --debug-port 9229  # 自定义端口
-```
-
-### 端口暴露 (Deployment 层的事)
-
-| Deployment | 暴露 debug 端口的方式 |
-|------------|----------------------|
-| Docker | `-p 5678:5678` |
-| K8s | `kubectl port-forward pod/xxx 5678:5678` |
-| Daytona | sandbox port mapping 配置 |
-| Modal | sandbox network 配置 |
-
-### IDE 配置
-
-**VSCode** `.vscode/launch.json`:
-```json
-{
-  "version": "0.2.0",
-  "configurations": [
-    {
-      "name": "agentix-server (local)",
-      "type": "debugpy",
-      "request": "launch",
-      "module": "agentix",
-      "cwd": "${workspaceFolder}/runtime",
-      "args": ["--port", "8000"]
-    },
-    {
-      "name": "Attach to sandbox",
-      "type": "debugpy",
-      "request": "attach",
-      "connect": { "host": "localhost", "port": 5678 },
-      "pathMappings": [
-        { "localRoot": "${workspaceFolder}/runtime/agentix", "remoteRoot": "/debug-src/agentix" }
-      ]
-    }
-  ]
-}
-```
-
-**PyCharm**: Run → Edit Configurations → Python Debug Server → host `localhost`, port `5678`
-
-**pdb** (terminal):
-```bash
-python -m pdb -m agentix
-```
-
-### Whitebox agent debugging
-
-同样的模式 — deps 从 Nix closure 来 (不变), source volume mount (实时编辑):
-
-```
-IDE attach → sandbox:5678
-              │
-              ├── agent source: volume mount (编辑即生效)
-              ├── agent deps: Nix closure (稳定, 不用重建)
-              └── debugpy: 断点、单步、inspect 变量
-```
-
-Deployment 层在创建沙箱时：
-1. 挂载 agent source 到沙箱内 (如 `/app/src`)
-2. 启动 agent 时加 debugpy: `python -m debugpy --listen 0.0.0.0:5678 /app/src/main.py`
-3. 暴露 5678 端口
-
-## Adding a New Agent
-
-1. Create `agents/{name}/default.nix`
-2. Register in `flake.nix`:
-   ```nix
-   packages.${system}.my-agent = import ./agents/my-agent/default.nix { inherit pkgs; };
-   ```
-3. Build: `nix build .#my-agent`
-4. Test:
-   ```bash
-   AGENT=$(nix-build agents/my-agent/default.nix --no-out-link)
-   docker run --rm -v /nix/store:/nix/store:ro $AGENT/bin/my-agent --version
-   ```
+See `docs/closure-protocol.md` for the closure ABI and `templates/closure-docker/README.md` for the Dockerfile contract.

@@ -10,21 +10,25 @@ from agentix.models import SandboxConfig, SandboxInfo
 class Deployment(ABC):
     """Sandbox lifecycle management.
 
-    Each infrastructure backend (Docker, K8s, Daytona, Modal)
-    implements this interface. The orchestrator doesn't care
-    which one is used.
+    Each infrastructure backend (Docker, K8s, Modal, ...) implements this
+    interface. The orchestrator doesn't care which one is used.
+
+    The deployment can be used as an async context manager; any sandboxes
+    still alive on __aexit__ are deleted.
     """
 
     @abstractmethod
     async def create(self, config: SandboxConfig) -> SandboxInfo:
         """Create a sandbox.
 
-        One step:
-        1. Create container/sandbox from task_image
-        2. Inject runtime closure
-        3. Inject agent closure
-        4. Set PATH
-        5. Start agentix-server
+        Steps (implementation-specific):
+        1. Ensure each closure image's /nix content is available (e.g. populated
+           into a named volume keyed by image digest).
+        2. Mount each closure at `/mnt/<namespace>:ro` and provide a writable
+           tmpfs `/nix`; the sandbox entrypoint merges store paths via a
+           symlink forest under `/nix/store`.
+        3. Exec the agentix runtime server (`/mnt/runtime/entry/bin/start`);
+           it scans `/mnt` on startup and forks every closure it finds.
 
         Returns SandboxInfo with runtime_url for HTTP communication.
         """
@@ -42,3 +46,18 @@ class Deployment(ABC):
     @abstractmethod
     async def delete(self, sandbox_id: str) -> None:
         """Destroy sandbox and release resources."""
+
+    @abstractmethod
+    def active_sandboxes(self) -> list[str]:
+        """Return the IDs of sandboxes this deployment has created and not yet deleted."""
+
+    async def delete_all(self) -> None:
+        """Delete every sandbox still alive under this deployment."""
+        for sandbox_id in self.active_sandboxes():
+            await self.delete(sandbox_id)
+
+    async def __aenter__(self) -> Deployment:
+        return self
+
+    async def __aexit__(self, *args) -> None:
+        await self.delete_all()
