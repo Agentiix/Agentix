@@ -15,16 +15,20 @@ decorators, no base classes.
 
 from __future__ import annotations
 
+import collections.abc as cabc
 import inspect
+import json
 import logging
 import traceback
-from collections.abc import Awaitable
+from collections.abc import AsyncIterator, Awaitable
 from dataclasses import dataclass
-from typing import Any, Callable, Generic, ParamSpec, TypeVar
+from typing import Any, Callable, Generic, ParamSpec, TypeVar, get_args, get_origin
 
 from pydantic import TypeAdapter, ValidationError
 
 from agentix.models import RemoteError, RemoteRequest, RemoteResponse
+
+_STREAM_ORIGINS = (cabc.AsyncIterator, cabc.AsyncGenerator)
 
 logger = logging.getLogger("agentix.dispatch")
 
@@ -36,10 +40,12 @@ R = TypeVar("R")
 class _BoundMethod(Generic[P, R]):
     name: str
     stub: Callable[P, R]
-    impl: Callable[..., R | Awaitable[R]]
+    impl: Callable[..., Any]
     signature: inspect.Signature
     param_adapters: dict[str, TypeAdapter[Any]]
     return_adapter: TypeAdapter[Any]
+    is_stream: bool = False
+    item_adapter: TypeAdapter[Any] | None = None
 
 
 class Dispatcher:
@@ -80,17 +86,32 @@ class Dispatcher:
             ann = param.annotation if param.annotation is not inspect.Parameter.empty else Any
             param_adapters[pname] = TypeAdapter(ann)
         return_ann = sig.return_annotation if sig.return_annotation is not inspect.Signature.empty else Any
+        is_stream = get_origin(return_ann) in _STREAM_ORIGINS
+        item_adapter: TypeAdapter[Any] | None = None
+        if is_stream:
+            args = get_args(return_ann)
+            item_type = args[0] if args else Any
+            item_adapter = TypeAdapter(item_type)
+            return_adapter = TypeAdapter(Any)  # unused on streaming path
+        else:
+            return_adapter = TypeAdapter(return_ann)
         self._methods[name] = _BoundMethod(
             name=name,
             stub=stub,
             impl=impl,
             signature=sig,
             param_adapters=param_adapters,
-            return_adapter=TypeAdapter(return_ann),
+            return_adapter=return_adapter,
+            is_stream=is_stream,
+            item_adapter=item_adapter,
         )
 
     def methods(self) -> list[str]:
         return list(self._methods)
+
+    def is_streaming(self, method: str) -> bool:
+        m = self._methods.get(method)
+        return m is not None and m.is_stream
 
     async def dispatch(self, request: RemoteRequest) -> RemoteResponse:
         """Route a RemoteRequest to its bound impl, returning the wire response.
@@ -142,6 +163,63 @@ class Dispatcher:
             )
         return RemoteResponse(ok=True, value=value)
 
+    async def dispatch_stream(self, request: RemoteRequest) -> AsyncIterator[bytes]:
+        """Run a streaming impl, yielding NDJSON-encoded events.
+
+        Wire shape (one JSON object per line, `\\n` terminated):
+            {"item": <serialized>}      — per yielded value
+            {"error": {...}}            — impl raised mid-stream or wire-side err
+            {"end": true}               — normal completion sentinel
+
+        Caller (RuntimeClient._remote_stream) consumes lines until either
+        `error` (raises) or `end` (terminates).
+        """
+        m = self._methods.get(request.method)
+        if m is None:
+            err = RemoteError(
+                type="MethodNotFound",
+                message=f"method '{request.method}' is not bound on this dispatcher; "
+                f"available: {sorted(self._methods)}",
+            )
+            yield _ndjson({"error": err.model_dump()})
+            return
+        if not m.is_stream:
+            err = RemoteError(
+                type="NotAStreamingMethod",
+                message=f"method '{request.method}' has non-streaming return type",
+            )
+            yield _ndjson({"error": err.model_dump()})
+            return
+        try:
+            args, kwargs = self._coerce(m, request.args, request.kwargs)
+        except ValidationError as exc:
+            yield _ndjson({"error": RemoteError(type="ValidationError", message=str(exc)).model_dump()})
+            return
+        try:
+            result = m.impl(*args, **kwargs)
+            if inspect.isawaitable(result):
+                result = await result
+            assert m.item_adapter is not None
+            async for item in result:
+                try:
+                    value = m.item_adapter.dump_python(item, mode="json")
+                except Exception as exc:
+                    yield _ndjson({"error": RemoteError(
+                        type="SerializationError",
+                        message=f"failed to serialize item: {exc}",
+                    ).model_dump()})
+                    return
+                yield _ndjson({"item": value})
+        except Exception as exc:
+            logger.exception("closure stream impl '%s' raised mid-stream", m.name)
+            yield _ndjson({"error": RemoteError(
+                type=type(exc).__name__,
+                message=str(exc),
+                traceback=traceback.format_exc(),
+            ).model_dump()})
+            return
+        yield _ndjson({"end": True})
+
     @staticmethod
     def _coerce(
         m: _BoundMethod[Any, Any],
@@ -177,6 +255,10 @@ class Dispatcher:
             else:  # KEYWORD_ONLY
                 out_kwargs[pname] = v
         return out_args, out_kwargs
+
+
+def _ndjson(obj: dict[str, Any]) -> bytes:
+    return (json.dumps(obj) + "\n").encode()
 
 
 class Registry:

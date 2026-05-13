@@ -189,6 +189,43 @@ async with RuntimeClient(sandbox.runtime_url) as c:
 
 No magic registration, no decorators on the stubs. The function reference and its signature carry everything the wire needs.
 
+## Streaming returns
+
+A stub annotated `-> AsyncIterator[T]` (or `AsyncGenerator[T, ...]`) opts into streaming. The impl is an `async def` generator:
+
+```python
+# __init__.py
+from typing import AsyncIterator
+
+def chat(prompt: str) -> AsyncIterator[Token]:
+    raise NotImplementedError("call via RuntimeClient.remote(chat, ...)")
+
+# _impl.py
+async def chat(prompt: str) -> AsyncIterator[Token]:
+    proc = await asyncio.create_subprocess_exec("claude", "-p", prompt, ...)
+    async for line in proc.stdout:
+        yield Token(text=line.decode())
+```
+
+Caller iterates directly — **no `await`**:
+
+```python
+async for token in c.remote(my_closure.chat, prompt="..."):
+    print(token.text)
+```
+
+`RuntimeClient.remote` picks the streaming or unary code path by inspecting the stub's return annotation. The wire stays at `POST /_remote`, but the response becomes `application/x-ndjson` — one JSON event per line:
+
+```jsonl
+{"item": {"text": "Hello", ...}}
+{"item": {"text": " world", ...}}
+{"end": true}
+```
+
+If the impl raises mid-stream, the next line is `{"error": {...}}` and the client raises `RemoteCallError`. Already-yielded items are observed before the raise.
+
+**Not supported in v1**: streaming inputs (chunked request body), bidirectional streaming, automatic back-pressure tuning. Items are consumed by the HTTP/1.1 chunked-transfer stream; slow consumers will TCP-block the impl's `yield`.
+
 ## Runtime built-ins
 
 Independent of any closure, the runtime exposes:

@@ -30,6 +30,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import ValidationError
 
 from agentix import __version__
@@ -167,13 +168,27 @@ async def list_closures() -> list[ClosureInfo]:
 # ── Remote dispatch ─────────────────────────────────────────────
 
 
-@app.post("/_remote", response_model=RemoteResponse)
-async def remote_call(request: RemoteRequest) -> RemoteResponse:
+@app.post("/_remote")
+async def remote_call(request: RemoteRequest):
+    """Single dispatch endpoint.
+
+    - For unary impls (signature returns `R`): responds 200 application/json
+      with a `RemoteResponse` body.
+    - For streaming impls (signature returns `AsyncIterator[T]`): responds
+      200 application/x-ndjson, one JSON event per line (`{"item": ...}`
+      while yielding, `{"end": true}` on normal completion, `{"error": ...}`
+      if the impl raises mid-stream).
+    """
     dispatcher = registry.get(request.package)
     if dispatcher is None:
         raise HTTPException(
             status_code=404,
             detail=f"closure not loaded: package={request.package!r}",
+        )
+    if dispatcher.is_streaming(request.method):
+        return StreamingResponse(
+            dispatcher.dispatch_stream(request),
+            media_type="application/x-ndjson",
         )
     return await dispatcher.dispatch(request)
 

@@ -12,11 +12,21 @@ the single typed entry point.
 
 from __future__ import annotations
 
+import collections.abc as cabc
 import inspect
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Coroutine
 from pathlib import Path
-from typing import Any, Callable, ParamSpec, TypeVar
+from typing import (
+    Any,
+    AsyncGenerator,
+    Callable,
+    ParamSpec,
+    TypeVar,
+    get_args,
+    get_origin,
+    overload,
+)
 
 import httpx
 from pydantic import TypeAdapter
@@ -34,6 +44,9 @@ from agentix.models import (
 
 P = ParamSpec("P")
 R = TypeVar("R")
+T = TypeVar("T")
+
+_STREAM_ORIGINS = (cabc.AsyncIterator, cabc.AsyncGenerator)
 
 
 class RemoteCallError(RuntimeError):
@@ -77,19 +90,52 @@ class RuntimeClient:
 
     # ── typed remote call ────────────────────────────────────────
 
-    async def remote(
+    @overload
+    def remote(
         self,
-        fn: Callable[P, R],
+        fn: Callable[P, AsyncIterator[T]],
+        /,
         *args: P.args,
         **kwargs: P.kwargs,
-    ) -> R:
+    ) -> AsyncIterator[T]: ...
+
+    @overload
+    def remote(
+        self,
+        fn: Callable[P, AsyncGenerator[T, Any]],
+        /,
+        *args: P.args,
+        **kwargs: P.kwargs,
+    ) -> AsyncIterator[T]: ...
+
+    @overload
+    def remote(
+        self,
+        fn: Callable[P, R],
+        /,
+        *args: P.args,
+        **kwargs: P.kwargs,
+    ) -> Coroutine[Any, Any, R]: ...
+
+    def remote(self, fn, *args, **kwargs):
         """Execute `fn` in the sandbox and return its typed result.
 
         `fn` must be a stub function exported by a closure's Python package
         (e.g. `from agentix_closures.claude_code import run`). Routing uses
-        `fn.__module__`; method name is `fn.__name__`; the return type is
-        decoded via `inspect.signature(fn).return_annotation`.
+        `fn.__module__`; method name is `fn.__name__`.
+
+        Polymorphic on the stub's return annotation:
+        - `AsyncIterator[T]` / `AsyncGenerator[T, ...]` → returns an
+          `AsyncIterator[T]` directly; use `async for x in c.remote(fn, ...)`.
+        - Anything else → returns a coroutine resolving to the typed value;
+          use `await c.remote(fn, ...)`.
         """
+        return_ann = inspect.signature(fn).return_annotation
+        if get_origin(return_ann) in _STREAM_ORIGINS:
+            return self._remote_stream(fn, return_ann, *args, **kwargs)
+        return self._remote_unary(fn, return_ann, *args, **kwargs)
+
+    async def _remote_unary(self, fn, return_ann, *args, **kwargs):
         package = fn.__module__
         method = fn.__name__
         body = RemoteRequest(package=package, method=method, args=list(args), kwargs=dict(kwargs))
@@ -99,10 +145,33 @@ class RuntimeClient:
         if not resp.ok:
             assert resp.error is not None
             raise RemoteCallError(package=package, method=method, error=resp.error)
-        return_ann = inspect.signature(fn).return_annotation
         if return_ann is inspect.Signature.empty:
-            return resp.value  # type: ignore[return-value]
+            return resp.value
         return TypeAdapter(return_ann).validate_python(resp.value)
+
+    async def _remote_stream(self, fn, return_ann, *args, **kwargs):
+        package = fn.__module__
+        method = fn.__name__
+        body = RemoteRequest(package=package, method=method, args=list(args), kwargs=dict(kwargs))
+        args_t = get_args(return_ann)
+        item_type = args_t[0] if args_t else Any
+        item_adapter = TypeAdapter(item_type)
+        async with self._client.stream(
+            "POST", "/_remote", json=body.model_dump(),
+        ) as r:
+            r.raise_for_status()
+            async for raw in r.aiter_lines():
+                line = raw.strip()
+                if not line:
+                    continue
+                event = json.loads(line)
+                if "end" in event:
+                    return
+                if "error" in event:
+                    err = RemoteError.model_validate(event["error"])
+                    raise RemoteCallError(package=package, method=method, error=err)
+                if "item" in event:
+                    yield item_adapter.validate_python(event["item"])
 
     # ── runtime I/O primitives (exec / upload / download) ───────
 

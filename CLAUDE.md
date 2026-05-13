@@ -138,7 +138,7 @@ User subprocess default `PATH=/usr/local/bin:/usr/bin:/bin` (task image's). Nix 
 - **No subprocess-per-closure.** All closure impls run in the runtime's Python event loop.
 - **No reverse proxy.** `POST /_remote` is direct dispatch; closures expose Python functions, not arbitrary HTTP routes.
 - **No caller-chosen namespaces.** `manifest.package` is the identity. Two images shipping the same package collide.
-- **No streaming returns yet.** `RuntimeClient.remote` is request/response. Streaming wire is reserved for later.
+- **Streaming returns** via `AsyncIterator[T]` annotation on the stub: `async for x in c.remote(stream_fn, ...)`. Wire is NDJSON on the same `POST /_remote` endpoint. Streaming inputs / bidirectional streaming are not supported.
 - **No monolithic single-image runtime.** Each closure is its own image; the runtime image only ships `agentix` + `pydantic` + `fastapi` + `uvicorn`.
 
 ## Implementation notes

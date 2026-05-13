@@ -263,6 +263,140 @@ async def test_runtime_client_propagates_remote_error(runtime_module, mount_pack
     assert ei.value.error.type == "RuntimeError"
 
 
+# ── streaming ────────────────────────────────────────────────────
+
+
+_STREAM_INIT = textwrap.dedent("""
+    from dataclasses import dataclass
+    from typing import AsyncIterator
+
+    @dataclass
+    class Token:
+        text: str
+        idx: int
+
+    def chat(prompt: str, n: int = 3) -> AsyncIterator[Token]:
+        raise NotImplementedError
+""")
+
+_STREAM_IMPL = textwrap.dedent("""
+    from . import Token
+
+    async def chat(prompt, n=3):
+        for i in range(n):
+            yield Token(text=f"{prompt}-{i}", idx=i)
+""")
+
+_STREAM_REGISTER = textwrap.dedent("""
+    from agentix.dispatch import Dispatcher
+    from . import chat
+    from ._impl import chat as _chat
+    def register():
+        d = Dispatcher()
+        d.bind(chat, _chat)
+        return d
+""")
+
+
+async def test_stream_dispatch_yields_ndjson(runtime_module, mount_package):
+    server, _, _ = runtime_module
+    mount_package(
+        "streamer",
+        package="agentix_closures.streamer",
+        init_src=_STREAM_INIT,
+        impl_src=_STREAM_IMPL,
+        register_src=_STREAM_REGISTER,
+    )
+    await server._auto_load()
+
+    transport = httpx.ASGITransport(app=server.app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
+        async with http.stream(
+            "POST", "/_remote",
+            json={
+                "package": "agentix_closures.streamer",
+                "method": "chat",
+                "kwargs": {"prompt": "hi", "n": 2},
+            },
+        ) as r:
+            assert r.status_code == 200
+            assert "x-ndjson" in r.headers["content-type"]
+            import json as _json
+            events = [_json.loads(line) async for line in r.aiter_lines() if line.strip()]
+    assert events == [
+        {"item": {"text": "hi-0", "idx": 0}},
+        {"item": {"text": "hi-1", "idx": 1}},
+        {"end": True},
+    ]
+
+
+async def test_stream_via_runtime_client_typed(runtime_module, mount_package):
+    """`async for x in c.remote(stream_fn, ...)` yields typed items."""
+    server, _, _ = runtime_module
+    mount_package(
+        "streamer2",
+        package="agentix_closures.streamer2",
+        init_src=_STREAM_INIT,
+        impl_src=_STREAM_IMPL,
+        register_src=_STREAM_REGISTER,
+    )
+    await server._auto_load()
+
+    from agentix_closures.streamer2 import Token, chat
+
+    transport = httpx.ASGITransport(app=server.app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
+        client = RuntimeClient.__new__(RuntimeClient)
+        client._client = http
+        out = [tok async for tok in client.remote(chat, "go", n=3)]
+    assert len(out) == 3
+    assert all(isinstance(t, Token) for t in out)
+    assert [t.text for t in out] == ["go-0", "go-1", "go-2"]
+
+
+async def test_stream_impl_raises_mid_stream(runtime_module, mount_package):
+    """When the impl raises after yielding some items, RuntimeClient raises."""
+    init_src = textwrap.dedent("""
+        from typing import AsyncIterator
+        def explode(n: int = 2) -> AsyncIterator[int]:
+            raise NotImplementedError
+    """)
+    impl_src = textwrap.dedent("""
+        async def explode(n=2):
+            for i in range(n):
+                yield i
+            raise ValueError("kaboom-after-yield")
+    """)
+    register_src = textwrap.dedent("""
+        from agentix.dispatch import Dispatcher
+        from . import explode
+        from ._impl import explode as _e
+        def register():
+            d = Dispatcher(); d.bind(explode, _e); return d
+    """)
+    server, _, _ = runtime_module
+    mount_package(
+        "exploder",
+        package="agentix_closures.exploder",
+        init_src=init_src, impl_src=impl_src, register_src=register_src,
+    )
+    await server._auto_load()
+
+    from agentix_closures.exploder import explode
+
+    transport = httpx.ASGITransport(app=server.app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
+        client = RuntimeClient.__new__(RuntimeClient)
+        client._client = http
+        collected: list[int] = []
+        with pytest.raises(RemoteCallError) as ei:
+            async for x in client.remote(explode, n=2):
+                collected.append(x)
+    assert collected == [0, 1]  # got items before the raise
+    assert ei.value.error.type == "ValueError"
+    assert "kaboom-after-yield" in ei.value.error.message
+
+
 # ── support fixture ──────────────────────────────────────────────
 
 
