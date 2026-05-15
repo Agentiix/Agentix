@@ -28,7 +28,6 @@ first runtime call; this script notices at CI time.
 from __future__ import annotations
 
 import argparse
-import importlib
 import inspect
 import json
 import sys
@@ -42,7 +41,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from agentix.dispatch import Dispatcher  # noqa: E402
+from agentix.dispatch import Dispatcher, _import_and_register  # noqa: E402
 from agentix.models import AGENTIX_CLOSURE_ABI, ClosureManifest  # noqa: E402
 
 
@@ -84,7 +83,13 @@ def _load_manifest(closure_dir: Path) -> ClosureManifest:
 
 
 def _load_dispatcher(closure_dir: Path, manifest: ClosureManifest) -> Dispatcher:
-    """Make the closure importable and call its `_register.register()`."""
+    """Make the closure importable, then build its dispatcher.
+
+    Delegates to `agentix.dispatch._import_and_register`, which handles
+    both shapes:
+      * explicit `_register.py` (legacy / escape hatch)
+      * convention-based auto-discovery from `__init__.py` + `_impl.py`
+    """
     py_root = closure_dir
     # Two conventional layouts: closure root contains `agentix_closures/<name>/`
     # directly (development tree), or the Docker image layout
@@ -97,15 +102,7 @@ def _load_dispatcher(closure_dir: Path, manifest: ClosureManifest) -> Dispatcher
     py_str = str(py_root)
     if py_str not in sys.path:
         sys.path.insert(0, py_str)
-    importlib.import_module(manifest.package)
-    register_mod = importlib.import_module(f"{manifest.package}._register")
-    dispatcher = register_mod.register()
-    if not isinstance(dispatcher, Dispatcher):
-        raise TypeError(
-            f"{manifest.package}._register.register() returned "
-            f"{type(dispatcher).__name__}, expected Dispatcher"
-        )
-    return dispatcher
+    return _import_and_register(manifest)
 
 
 def _resolved_hints(fn: object) -> dict[str, typing.Any]:

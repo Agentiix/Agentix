@@ -217,3 +217,91 @@ async def test_bind_namespace_works_with_protocol_typed_impl() -> None:
         package="x", method="hello", args=[], kwargs={"name": "alice"},
     ))
     assert resp.ok and resp.value == "hi alice"
+
+
+# ── Auto-discovery (no _register.py) ────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_auto_discover_finds_unique_namespace_pair(tmp_path, monkeypatch) -> None:
+    """No `_register.py` → runtime infers stub + impl by convention."""
+    import sys
+    import textwrap
+
+    pkg_root = tmp_path / "agentix_closures" / "autodisc"
+    pkg_root.mkdir(parents=True)
+    (pkg_root / "__init__.py").write_text(textwrap.dedent("""
+        from agentix.namespace import Namespace
+        class Math(Namespace):
+            async def add(self, a: int, b: int) -> int: ...
+    """))
+    (pkg_root / "_impl.py").write_text(textwrap.dedent("""
+        class MathImpl:
+            async def add(self, a: int, b: int) -> int:
+                return a + b
+    """))
+    monkeypatch.syspath_prepend(str(tmp_path))
+    from agentix.dispatch import _import_and_register
+    from agentix.models import ClosureManifest
+    manifest = ClosureManifest(
+        abi=1, name="autodisc", version="0.0.1",
+        package="agentix_closures.autodisc",
+    )
+    try:
+        d = _import_and_register(manifest)
+        assert d.methods() == ["add"]
+        resp = await d.dispatch(RemoteRequest(
+            package="x", method="add", args=[], kwargs={"a": 4, "b": 5},
+        ))
+        assert resp.ok and resp.value == 9
+    finally:
+        sys.modules.pop("agentix_closures.autodisc", None)
+        sys.modules.pop("agentix_closures.autodisc._impl", None)
+
+
+def test_auto_discover_rejects_zero_namespaces(tmp_path, monkeypatch) -> None:
+    import sys
+
+    pkg_root = tmp_path / "agentix_closures" / "empty"
+    pkg_root.mkdir(parents=True)
+    (pkg_root / "__init__.py").write_text("# no Namespace here\n")
+    (pkg_root / "_impl.py").write_text("# nothing\n")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    from agentix.dispatch import _import_and_register
+    from agentix.models import ClosureManifest
+    manifest = ClosureManifest(
+        abi=1, name="empty", version="0.0.1",
+        package="agentix_closures.empty",
+    )
+    try:
+        with pytest.raises(TypeError, match="no Namespace subclass"):
+            _import_and_register(manifest)
+    finally:
+        sys.modules.pop("agentix_closures.empty", None)
+
+
+def test_auto_discover_rejects_missing_impl_class(tmp_path, monkeypatch) -> None:
+    import sys
+    import textwrap
+
+    pkg_root = tmp_path / "agentix_closures" / "noimpl"
+    pkg_root.mkdir(parents=True)
+    (pkg_root / "__init__.py").write_text(textwrap.dedent("""
+        from agentix.namespace import Namespace
+        class Greet(Namespace):
+            async def hi(self) -> str: ...
+    """))
+    (pkg_root / "_impl.py").write_text("# missing GreetImpl\n")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    from agentix.dispatch import _import_and_register
+    from agentix.models import ClosureManifest
+    manifest = ClosureManifest(
+        abi=1, name="noimpl", version="0.0.1",
+        package="agentix_closures.noimpl",
+    )
+    try:
+        with pytest.raises(TypeError, match="GreetImpl"):
+            _import_and_register(manifest)
+    finally:
+        sys.modules.pop("agentix_closures.noimpl", None)
+        sys.modules.pop("agentix_closures.noimpl._impl", None)

@@ -38,31 +38,34 @@ Every closure image satisfies exactly:
 
 ### Closure Python package layout
 
-The Python package the closure ships must declare three things:
+The Python package the closure ships:
 
 ```
 agentix_closures/
 └── <name>/
-    ├── __init__.py        # stub: typed function signatures (body: raise NotImplementedError)
-    ├── _impl.py           # real implementations (only the sandbox imports this)
-    └── _register.py       # def register() -> Dispatcher
+    ├── __init__.py        # stub class: `class Foo(Namespace)` with `...`-bodied methods
+    ├── _impl.py           # impl class: `class FooImpl` — independent, no inheritance
+    └── _register.py       # optional — see below
 ```
 
-- **`__init__.py`** is what callers import. Functions have `...` or `raise NotImplementedError` bodies — the signature is the contract; there is no body to run on the caller side.
-- **`_impl.py`** has the real bodies. Plain functions; no decorators, no FastAPI, no socket binding.
-- **`_register.py`** exposes `register() -> Dispatcher` that binds each stub to its impl:
+- **`__init__.py`** is what callers import. Stub methods have `...` bodies — the signature is the contract; there is no body to run on the caller side.
+- **`_impl.py`** has the real bodies on an independent class. Composition over inheritance: `FooImpl` does NOT subclass `Foo`.
+- **`_register.py`** is **optional**. By default the runtime auto-discovers:
+  - exactly one `Namespace` subclass declared in `__init__.py` (call it `Foo`)
+  - a class named `FooImpl` in `_impl.py`
+  - binds them via `Dispatcher().bind_namespace(Foo, FooImpl())`
+
+  Add a `_register.py` only when convention is wrong for the closure — e.g. the package binds multiple namespaces or needs imperative wiring:
   ```python
   from agentix.dispatch import Dispatcher
-  from . import run
-  from ._impl import run as _run
+  from . import Foo, Bar
+  from ._impl import FooImpl, BarImpl
 
   def register() -> Dispatcher:
-      d = Dispatcher()
-      d.bind(run, _run)
-      return d
+      return Dispatcher().bind_namespace(Foo, FooImpl()).bind_namespace(Bar, BarImpl())
   ```
 
-The runtime calls `register()` once on startup. No global mutable state in the closure.
+The runtime imports each closure lazily on first call. No global mutable state in the closure.
 
 ### Sandbox layout at runtime
 

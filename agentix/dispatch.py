@@ -549,19 +549,78 @@ class Registry:
 
 
 def _import_and_register(manifest: ClosureManifest) -> Dispatcher:
-    """Import the closure's package and call `<pkg>._register.register()`.
+    """Build the dispatcher for a closure package.
+
+    Two paths, tried in order:
+
+      1. **Explicit:** if `<pkg>._register` is importable and exposes a
+         `register() -> Dispatcher`, use it. This is the escape hatch for
+         closures that bind multiple namespaces, do custom wiring, or
+         otherwise need imperative control.
+
+      2. **Convention:** otherwise, auto-discover. Find the unique
+         `Namespace` subclass declared in `<pkg>.__init__` and the class
+         `<StubName>Impl` in `<pkg>._impl`, then
+         `Dispatcher().bind_namespace(Stub, Impl())`.
 
     `entry/python` is already on sys.path (added at `Registry.register` time).
     The caller wraps any exception into the entry's `.error`.
     """
-    importlib.import_module(manifest.package)  # validate the stub module exists
-    register_mod = importlib.import_module(f"{manifest.package}._register")
-    if not hasattr(register_mod, "register"):
-        raise AttributeError(f"{manifest.package}._register has no register()")
-    dispatcher = register_mod.register()
-    if not isinstance(dispatcher, Dispatcher):
+    pkg = importlib.import_module(manifest.package)
+    try:
+        register_mod = importlib.import_module(f"{manifest.package}._register")
+    except ImportError:
+        register_mod = None
+    if register_mod is not None and hasattr(register_mod, "register"):
+        dispatcher = register_mod.register()
+        if not isinstance(dispatcher, Dispatcher):
+            raise TypeError(
+                f"{manifest.package}._register.register() returned "
+                f"{type(dispatcher).__name__}, expected Dispatcher"
+            )
+        return dispatcher
+    return _auto_discover_dispatcher(pkg, manifest.package)
+
+
+def _auto_discover_dispatcher(pkg: Any, package: str) -> Dispatcher:
+    """Bind by convention: exactly one `Namespace` subclass in the package's
+    `__init__`, paired with `<StubName>Impl` from `_impl`.
+
+    The 'unique Namespace subclass' rule keeps mappings unambiguous; a
+    closure that genuinely needs multiple namespaces opts out by writing
+    `_register.py`.
+    """
+    # `Namespace` is a `@runtime_checkable` empty Protocol — `issubclass`
+    # against it is structural and trivially true for every class. Filter by
+    # the nominal MRO instead so only real `class X(Namespace)` declarations
+    # count, not adjacent dataclasses / dataclass discriminator variants.
+    candidates = [
+        cls for cls in vars(pkg).values()
+        if isinstance(cls, type)
+        and Namespace in cls.__mro__
+        and cls is not Namespace
+        and getattr(cls, "__module__", None) == pkg.__name__
+    ]
+    if not candidates:
         raise TypeError(
-            f"{manifest.package}._register.register() returned "
-            f"{type(dispatcher).__name__}, expected Dispatcher"
+            f"{package}: no Namespace subclass declared in __init__.py and "
+            f"no _register.py provided — nothing to bind"
         )
-    return dispatcher
+    if len(candidates) > 1:
+        names = sorted(c.__name__ for c in candidates)
+        raise TypeError(
+            f"{package}: multiple Namespace subclasses found in __init__.py "
+            f"({names}); auto-discovery requires exactly one. Add _register.py "
+            f"to bind multiple namespaces explicitly."
+        )
+    stub_cls = candidates[0]
+    impl_mod = importlib.import_module(f"{package}._impl")
+    impl_cls_name = f"{stub_cls.__name__}Impl"
+    impl_cls = getattr(impl_mod, impl_cls_name, None)
+    if impl_cls is None or not isinstance(impl_cls, type):
+        raise TypeError(
+            f"{package}._impl: expected class '{impl_cls_name}' "
+            f"(convention: <StubName>Impl) for auto-discovery; provide "
+            f"_register.py to override the convention"
+        )
+    return Dispatcher().bind_namespace(stub_cls, impl_cls())
