@@ -13,6 +13,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
 
+from agentix.idents import PackageName, SandboxId
+
 # ── Closure manifest (shipped inside the closure image) ───────────
 
 AGENTIX_CLOSURE_ABI = 1
@@ -33,7 +35,7 @@ class ClosureManifest(BaseModel):
     abi: int
     name: str
     version: str
-    package: str = Field(
+    package: PackageName = Field(
         description="Python import path of the closure package, e.g. 'agentix_closures.claude_code'."
     )
     description: str | None = None
@@ -91,6 +93,6 @@ class SandboxConfig(BaseModel):
 
 
 class SandboxInfo(BaseModel):
-    sandbox_id: str
+    sandbox_id: SandboxId
     runtime_url: str
     status: str = "running"

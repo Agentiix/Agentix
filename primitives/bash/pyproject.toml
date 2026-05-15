@@ -1,0 +1,13 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agentix-primitive-bash"
+version = "0.1.0"
+description = "Bash command execution primitive for Agentix"
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.hatch.build.targets.wheel]
+packages = ["agentix_closures/bash"]

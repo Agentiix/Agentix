@@ -4,13 +4,15 @@ Wraps:
   - typed remote-call dispatch: `RuntimeClient.remote(fn, *args, **kwargs)`,
     where `fn` is a stub function imported from a closure's Python package.
     Routing key is `fn.__module__`; result is decoded into `fn`'s return type.
-  - built-in `/exec`, `/upload`, `/download`, plus `/closures` introspection.
+    Shell exec / file I/O live in the `bash` and `files` primitive closures —
+    call them via `c.remote(bash.Bash.run, ...)` and `c.remote(files.Files.upload, ...)`.
+  - `/closures` introspection and `/health`.
   - log subscription: `RuntimeClient.logs()` is an `AsyncIterator[LogRecord]`
-    fed by a Socket.IO `log` event stream.
+    fed by a Socket.IO `log` event stream; same for `RuntimeClient.traces()`.
 
 Two transports underneath:
-  - HTTP for unary RPC (`POST /_remote`) and runtime built-ins.
-  - Socket.IO for server-streaming, bidirectional, and log subscription.
+  - HTTP for unary RPC (`POST /_remote`).
+  - Socket.IO for server-streaming, bidirectional, and log/trace subscription.
 
 The Socket.IO connection is lazy and shared across all stream/bidi/log calls
 on the same client. Per-`call_id` queue routing demultiplexes concurrent calls.
@@ -21,11 +23,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import inspect
-import json
 import logging
 import uuid
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Coroutine
-from pathlib import Path
 from typing import (
     Any,
     ParamSpec,
@@ -60,8 +60,6 @@ from agentix.runtime.events import (
 )
 from agentix.runtime.models import (
     STREAM_ORIGINS,
-    BashCommandRequest,
-    BashCommandResponse,
     ClosureInfo,
     HealthResponse,
     LogRecord,
@@ -69,8 +67,8 @@ from agentix.runtime.models import (
     RemoteRequest,
     RemoteResponse,
     TraceEvent,
-    UploadResponse,
 )
+from agentix.wire import select_pattern
 
 logger = logging.getLogger("agentix.client")
 
@@ -163,27 +161,26 @@ class RuntimeClient:
     def remote(self, fn, *args, **kwargs):
         """Execute `fn` in the sandbox and return its typed result.
 
-        Polymorphic on the stub's signature:
-        - Both input and output are `AsyncIterator[T]` → bidi via Socket.IO;
-          returns an `AsyncIterator[T]`. Caller passes its input iterator as
-          the matching positional/keyword arg.
-        - Output is `AsyncIterator[T]`, no input streams → server stream via
-          Socket.IO; returns an `AsyncIterator[T]`.
-        - Otherwise → unary HTTP; returns a coroutine resolving to the typed
-          value; use `await c.remote(fn, ...)`.
+        Dispatch is polymorphic on the stub's signature — a `WirePattern`
+        is selected via `agentix.wire.select_pattern(sig)` and that
+        pattern owns the wire framing (HTTP for unary, Socket.IO for
+        stream/bidi, or anything a third-party pattern registers).
+
+        The three built-in patterns:
+          * Output `AsyncIterator[T]` + one `AsyncIterator[U]` parameter
+            → `BidiPattern`; returns `AsyncIterator[T]`.
+          * Output `AsyncIterator[T]`, no streaming parameters →
+            `StreamPattern`; returns `AsyncIterator[T]`.
+          * Otherwise → `UnaryPattern`; returns `Coroutine[..., R]`;
+            caller `await`s it.
         """
-        sig = inspect.signature(fn)
-        output_is_stream = get_origin(sig.return_annotation) in STREAM_ORIGINS
-        input_is_stream = any(
-            get_origin(p.annotation) in STREAM_ORIGINS
-            for p in sig.parameters.values()
-            if p.annotation is not inspect.Parameter.empty
-        )
-        if output_is_stream and input_is_stream:
-            return self._remote_bidi(fn, sig, *args, **kwargs)
-        if output_is_stream:
-            return self._remote_stream(fn, sig, *args, **kwargs)
-        return self._remote_unary(fn, sig.return_annotation, *args, **kwargs)
+        # eval_str=True: stubs declared with `from __future__ import
+        # annotations` would otherwise expose string annotations here,
+        # mis-routing stream/bidi shapes to UnaryPattern.
+        sig = inspect.signature(fn, eval_str=True)
+        pattern = select_pattern(sig)()
+        pattern.bind(sig)
+        return pattern.client_invoke(self, fn, sig, args, kwargs)
 
     async def _remote_unary(self, fn, return_ann, *args, **kwargs):
         package = fn.__module__
@@ -411,94 +408,8 @@ class RuntimeClient:
         for q in list(self._trace_subscribers):
             q.put_nowait(data)
 
-    # ── runtime I/O primitives (exec / upload / download) ───────
-
-    @staticmethod
-    def _exec_body(
-        command: str,
-        cwd: str | None,
-        env: dict[str, str] | None,
-        timeout: float | None,
-        max_output: int | None = None,
-        paths_from: list[str] | None = None,
-    ) -> dict[str, Any]:
-        return BashCommandRequest(
-            command=command,
-            cwd=cwd,
-            env=env,
-            timeout=timeout,
-            max_output=max_output,
-            paths_from=paths_from,
-        ).model_dump(exclude_none=True)
-
-    async def run(
-        self,
-        command: str,
-        cwd: str | None = None,
-        env: dict[str, str] | None = None,
-        timeout: float | None = None,
-        max_output: int | None = None,
-        paths_from: list[str] | None = None,
-    ) -> BashCommandResponse:
-        """Buffered shell exec: run `command` and return the full captured output.
-
-        `paths_from` prepends the `bin/` of the listed closures (by Python
-        package path) to PATH for this command only. Pass `["*"]` to include
-        every mounted closure.
-        """
-        body = self._exec_body(command, cwd, env, timeout, max_output, paths_from)
-        r = await self._client.post("/exec", json=body)
-        r.raise_for_status()
-        return BashCommandResponse.model_validate(r.json())
-
-    async def run_stream(
-        self,
-        command: str,
-        cwd: str | None = None,
-        env: dict[str, str] | None = None,
-        timeout: float | None = None,
-        paths_from: list[str] | None = None,
-    ) -> AsyncIterator[dict[str, Any]]:
-        """Stream exec output as SSE events.
-
-        Yields decoded event dicts like:
-            {"event": "stdout", "stream": "stdout", "data": "..."}
-            {"event": "exit",   "exit_code": 0}
-        """
-        body = self._exec_body(command, cwd, env, timeout, paths_from=paths_from)
-        buf = b""
-        async with self._client.stream(
-            "POST", "/exec", json=body, headers={"accept": "text/event-stream"}
-        ) as r:
-            r.raise_for_status()
-            async for chunk in r.aiter_bytes():
-                buf += chunk
-                while b"\n\n" in buf:
-                    event_bytes, buf = buf.split(b"\n\n", 1)
-                    event = _parse_sse_event(event_bytes)
-                    if event is not None:
-                        yield event
-
-    async def upload(self, local_path: str | Path, dest: str) -> UploadResponse:
-        """Upload a local file to `dest` inside the sandbox."""
-        p = Path(local_path)
-        with open(p, "rb") as f:
-            r = await self._client.post(
-                "/upload",
-                files={"file": (p.name, f)},
-                data={"path": dest},
-            )
-        r.raise_for_status()
-        return UploadResponse.model_validate(r.json())
-
-    async def download(self, path: str, local_path: str | Path) -> int:
-        """Stream a sandbox file down to `local_path`."""
-        r = await self._client.get("/download", params={"path": path})
-        r.raise_for_status()
-        lp = Path(local_path)
-        lp.parent.mkdir(parents=True, exist_ok=True)
-        lp.write_bytes(r.content)
-        return len(r.content)
+    # Shell exec / file I/O are not in the runtime core. Mount the `bash`
+    # and `files` primitive closures and dispatch through `c.remote(...)`.
 
 
 def _encode_args(sig: inspect.Signature, args: tuple) -> list[Any]:
@@ -538,24 +449,3 @@ def _encode_kwargs(sig: inspect.Signature, kwargs: dict[str, Any]) -> dict[str, 
     return out
 
 
-def _parse_sse_event(raw: bytes) -> dict[str, Any] | None:
-    """Parse a single SSE event block into a dict. Returns None for keepalives."""
-    event: str | None = None
-    data_lines: list[str] = []
-    for line in raw.decode(errors="replace").splitlines():
-        if not line or line.startswith(":"):
-            continue
-        if line.startswith("event:"):
-            event = line[6:].strip()
-        elif line.startswith("data:"):
-            data_lines.append(line[5:].lstrip())
-    if not data_lines:
-        return None
-    payload = "\n".join(data_lines)
-    try:
-        parsed = json.loads(payload)
-    except json.JSONDecodeError:
-        parsed = {"data": payload}
-    if event:
-        parsed.setdefault("event", event)
-    return parsed

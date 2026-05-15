@@ -1,5 +1,15 @@
 # Project conventions
 
+## 组合优于继承 / Composition over inheritance
+
+**Read this three times. Say it out loud once.**
+
+1. **组合优于继承.** This framework chooses composition over inheritance, everywhere it has the choice. Don't introduce inheritance to share behaviour, to mark relationships, or to give pyright a typing hook. Compose instead — pass an instance, register a callback, declare a Protocol.
+2. **组合优于继承.** The closure ABI is the canonical example. A closure's stub class (`class Bash(Namespace)`) and its impl class (`class BashImpl`) are **independent classes that share no inheritance edge**. `_register.py` composes them by handing both to `Dispatcher.bind_namespace(Bash, BashImpl())`. `BashImpl` provides the `Bash` interface; it isn't a kind of `Bash`.
+3. **组合优于继承.** When you reach for a base class to "share code" or "enforce a contract", stop. Ask: would a free function, a protocol, a wire-pattern strategy, or a deployment configuration object work instead? It almost always does. The cost of inheritance is that the parent and child are forever co-evolving; composition lets each piece change independently.
+
+The reverse — using inheritance — is allowed only when the relationship is genuinely is-a and there's no composition alternative (e.g. `DockerDeployment` implements `Deployment`'s abstract methods because backends must satisfy a fixed lifecycle interface). Even then, prefer the smallest possible inheritance footprint.
+
 ## No backward compatibility
 
 This repo is in active design. **Breaking changes are fine; do not introduce backward-compat shims.**
@@ -148,7 +158,9 @@ async with RuntimeClient(sandbox.runtime_url) as c:
 
 `RuntimeClient.remote(fn, *args, **kwargs)` reads `fn.__module__` (routing key) + `fn.__name__` (method), serialises via pydantic `TypeAdapter` driven by `inspect.signature(fn)`, decodes the response into `fn`'s return type.
 
-### PATH policy for `/exec`
+### PATH policy for the `bash` primitive
+
+Shell exec is the `bash` primitive closure (`primitives/bash/`), not a runtime built-in. Invoke via `c.remote(bash.run, command=...)`.
 
 User subprocess default `PATH=/usr/local/bin:/usr/bin:/bin` (task image's). Nix env vars (`LD_LIBRARY_PATH`, `NIX_*`, `PYTHONPATH`, etc.) scrubbed to avoid ABI clash. `paths_from=["agentix_closures.<name>"]` prepends that closure's `entry/bin` to PATH.
 
@@ -162,7 +174,7 @@ User subprocess default `PATH=/usr/local/bin:/usr/bin:/bin` (task image's). Nix 
 - **No subprocess-per-closure.** All closure impls run in the runtime's Python event loop.
 - **No reverse proxy.** `POST /_remote` is direct dispatch; closures expose Python functions, not arbitrary HTTP routes.
 - **No caller-chosen namespaces.** `manifest.package` is the identity. Two images shipping the same package collide.
-- **Streaming returns** via `AsyncIterator[T]` annotation on the stub: `async for x in c.remote(stream_fn, ...)`. Wire is NDJSON on the same `POST /_remote` endpoint. Streaming inputs / bidirectional streaming are not supported.
+- **Streaming returns** via `AsyncIterator[T]` annotation on the stub: `async for x in c.remote(stream_fn, ...)`. Wire is Socket.IO `stream`/`stream:item`/`stream:end` events. Bidi (stub takes one `AsyncIterator[T]` parameter and returns `AsyncIterator[U]`) is supported via the `bidi:*` event family.
 - **No monolithic single-image runtime.** Each closure is its own image; the runtime image only ships `agentix` + `pydantic` + `fastapi` + `uvicorn`.
 
 ## Implementation notes
@@ -172,3 +184,92 @@ User subprocess default `PATH=/usr/local/bin:/usr/bin:/bin` (task image's). Nix 
 - **Closure Python deps stay thin.** Closures share the runtime's Python interpreter — Python wrappers should depend on stdlib + the `agentix` package itself (which already brings pydantic). Heavy deps belong in Nix-bundled native binaries, not in `pyproject.toml`.
 - **Sandbox starts fast.** Warm sandbox is `-v` mounts + tmpfs + symlink loop (shell-time, ~100 ms) + import of each closure package (typically tens of ms each).
 - **Populate is lock-serialised** in-process to avoid concurrent `docker run -v` races on the same image's volume. Cross-process coordination is not currently provided; documented as a single-orchestrator assumption.
+
+## Typing conventions
+
+The wire layer is loosely typed at the protocol level (strings, JSON), so we lean on the Python type system to keep the surrounding code honest. Four house rules:
+
+### 1. Namespace stubs + composition impls (R1)
+
+A closure's typed surface is a `Namespace` subclass with `...`-bodied methods. The matching impl is a **separate, independent class** whose methods structurally match the stub. `_register.register()` composes them:
+
+```python
+# __init__.py
+from agentix.namespace import Namespace
+
+class Bash(Namespace):
+    async def run(self, command: str) -> BashResult: ...
+    async def run_stream(self, command: str) -> AsyncIterator[BashEvent]: ...
+
+# _impl.py — no inheritance from Bash
+class BashImpl:
+    async def run(self, command: str) -> BashResult: ...
+    async def run_stream(self, command: str) -> AsyncIterator[BashEvent]: ...
+
+# _register.py
+def register() -> Dispatcher:
+    return Dispatcher.bind_namespace(Bash, BashImpl())
+```
+
+`Dispatcher.bind_namespace` walks the stub class via `agentix.namespace.discover_methods`, looks up the matching attribute on the impl instance, and calls `bind()` for each pair. Composition, not inheritance — re-read the rule three times above if tempted otherwise.
+
+**Static type checking** is opt-in. `Namespace` is a `Protocol` so users who want pyright to verify the impl can declare:
+
+```python
+@runtime_checkable
+class Bash(Namespace, Protocol):
+    async def run(self, command: str) -> BashResult: ...
+
+impl: Bash = BashImpl()  # pyright catches structural mismatch here
+```
+
+### 2. Pluggable wire patterns (R2)
+
+Call shapes (unary / server-stream / bidi / …) live in `agentix.wire` as `WirePattern` subclasses. Each pattern owns:
+
+* `matches(sig) -> bool` — does this signature use this pattern?
+* `bind(sig)` — per-method state precompute at `Dispatcher.bind` time.
+
+Built-ins ship as `UnaryPattern`, `StreamPattern`, `BidiPattern` and are registered in specific-to-general order. Third parties extend the framework by registering their own:
+
+```python
+from agentix.wire import WirePattern, register_pattern
+
+class PubSubPattern(WirePattern):
+    name = "pubsub"
+
+    @classmethod
+    def matches(cls, sig): ...
+
+    def bind(self, sig): ...
+
+register_pattern(PubSubPattern)
+```
+
+`register_pattern` prepends to the list — user patterns outrank built-ins. The Dispatcher picks the pattern at bind time and caches it on the bound method.
+
+### 3. Branded identifiers from `agentix.idents`
+
+There are four `str`s in the wire layer that are easy to confuse — a closure's import path, a method name, the rollout correlation key, and the sandbox handle. They are `NewType`d in `agentix/idents.py` (`PackageName`, `MethodName`, `CallId`, `SandboxId`) and consumed everywhere the wire types appear:
+
+- `ClosureManifest.package: PackageName`
+- `RemoteRequest.{package, method, call_id}`
+- `TraceEvent.{call_id, source}` (source is also a `PackageName`)
+- `Sandbox.sandbox_id` / `SandboxInfo.sandbox_id` / `DockerDeployment._ports`
+- `Dispatcher._methods` keyed by `MethodName`, `Registry._entries` by `PackageName`
+- `trace.set_call_context` / `trace.emit` / contextvars
+
+When you write new wire-adjacent code, use the branded types — pyright treats them as distinct, so swapping `MethodName` for `PackageName` becomes a type error. Pydantic v2 understands `NewType`, so JSON round-trip is unchanged.
+
+### 4. Stub ↔ impl signature drift is a CI failure
+
+`tools/check_stub_impl.py` loads each closure's `_register.register()` and compares the stub's signature against the impl's for every bound method — parameter names, kinds, defaults, annotations, return type. Run it locally:
+
+```
+python tools/check_stub_impl.py            # defaults to primitives/
+python tools/check_stub_impl.py path/to/closure
+```
+
+Drift causes a non-zero exit. This is the one class of bug the runtime itself cannot catch until the first call lands, so it gets caught in CI instead.
+
+The checker is shape-agnostic: it works for both legacy module-function stubs and for the upcoming class-based `Namespace` shape, because both bottom out at `Dispatcher.bind()`.

@@ -1,13 +1,18 @@
 """Sandbox-side runtime server.
 
-Composes FastAPI (for HTTP RPC + built-ins) and Socket.IO (for streams,
+Composes FastAPI (for HTTP RPC + LLM proxy) and Socket.IO (for streams,
 bidi, and log subscription) into the ASGI app uvicorn runs. Imports each
 mounted closure's Python package lazily on first call.
 
 Submodules:
-  - `app`      — FastAPI app, lifespan, Registry, /_remote unary dispatch
-  - `sio`      — Socket.IO server + event handlers + log forwarding
-  - `builtins` — /exec, /upload, /download routes
+  - `app`         — FastAPI app, lifespan, Registry, /_remote unary dispatch
+  - `sio`         — Socket.IO server + event handlers + log forwarding
+  - `llm_proxy`   — reverse-proxy `/_llm/<provider>/<path>` to upstream LLM APIs
+  - `trace_bridge` — pipes `agentix.trace.emit(...)` to the Socket.IO `trace` room
+
+Shell exec and file I/O moved out of the core: they ship as the `bash`
+and `files` primitive closures under `primitives/`. Invoke via
+`c.remote(bash.Bash.run, ...)` / `c.remote(files.Files.upload, ...)`.
 
 Public names re-exported here so legacy imports keep working:
   `from agentix.runtime.server import app, main, registry`

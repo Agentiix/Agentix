@@ -2,7 +2,6 @@
 
 In-process closure dispatch. The runtime is a single Python process serving:
 
-- built-in operations (exec/upload/download) mounted at root
 - `POST /_remote` — typed **unary** dispatch (one request → one response)
 - Socket.IO at `/socket.io/` — server-streaming, bidi, and log subscription,
   multiplexed by `call_id` on a single connection
@@ -40,7 +39,6 @@ from agentix.runtime.models import (
     RemoteRequest,
     RemoteResponse,
 )
-from agentix.runtime.server.builtins import router as builtins_router
 from agentix.runtime.server.llm_proxy import router as llm_proxy_router
 from agentix.runtime.server.sio import make_sio
 from agentix.runtime.server.trace_bridge import install as install_trace_bridge
@@ -110,7 +108,6 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="agentix", version=__version__, lifespan=lifespan)
 app.state.registry = registry
-app.include_router(builtins_router)
 app.include_router(llm_proxy_router)
 
 

@@ -20,8 +20,12 @@ jobs:
           python-version: "3.11"
           cache: pip
       - run: pip install -e '.[dev]'
-      - run: ruff check agentix/ tests/
-      - run: pytest tests/ -v
+      - name: lint
+        run: ruff check agentix/ tools/ tests/ primitives/
+      - name: stub ↔ impl signature drift
+        run: python tools/check_stub_impl.py primitives/
+      - name: unit tests
+        run: pytest tests/ -v
 
   # The end-to-end Docker job was retired alongside `tests/smoke_docker.py`
   # (which used the pre-typed-dispatch reverse-proxy API). The unit job's

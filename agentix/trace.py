@@ -21,12 +21,14 @@ import time
 from collections.abc import Callable
 from typing import Any, Final
 
-EmitFn = Callable[[str, dict[str, Any], str | None, str | None], None]
+from agentix.idents import CallId, PackageName
 
-_current_call_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+EmitFn = Callable[[str, dict[str, Any], CallId | None, PackageName | None], None]
+
+_current_call_id: contextvars.ContextVar[CallId | None] = contextvars.ContextVar(
     "agentix_trace_call_id", default=None,
 )
-_current_source: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+_current_source: contextvars.ContextVar[PackageName | None] = contextvars.ContextVar(
     "agentix_trace_source", default=None,
 )
 _emit_fn: EmitFn | None = None
@@ -44,8 +46,8 @@ def _uninstall_emitter() -> None:
 
 
 def set_call_context(
-    call_id: str | None,
-    source: str | None,
+    call_id: CallId | None,
+    source: PackageName | None,
 ) -> tuple[contextvars.Token, contextvars.Token]:
     """Set the active call_id + source for trace events emitted while this
     context is on the call stack. Returns the contextvar reset tokens.
@@ -60,12 +62,12 @@ def reset_call_context(tokens: tuple[contextvars.Token, contextvars.Token]) -> N
     _current_source.reset(src_token)
 
 
-def current_call_id() -> str | None:
+def current_call_id() -> CallId | None:
     """The call_id pinned by the dispatcher for the current request, if any."""
     return _current_call_id.get()
 
 
-def current_source() -> str | None:
+def current_source() -> PackageName | None:
     """The closure package currently being dispatched, if any."""
     return _current_source.get()
 
@@ -74,8 +76,8 @@ def emit(
     kind: str,
     payload: dict[str, Any] | None = None,
     *,
-    call_id: str | None = None,
-    source: str | None = None,
+    call_id: CallId | None = None,
+    source: PackageName | None = None,
 ) -> None:
     """Record a single trace event. No-op if tracing isn't enabled (e.g. the
     closure is running outside an agentix runtime).

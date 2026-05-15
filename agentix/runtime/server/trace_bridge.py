@@ -12,6 +12,7 @@ import asyncio
 import socketio
 
 import agentix.trace as trace
+from agentix.idents import CallId, PackageName
 from agentix.runtime.events import TRACE, TRACES_ROOM
 from agentix.runtime.models import TraceEvent
 
@@ -24,7 +25,7 @@ def install(sio: socketio.AsyncServer) -> None:
     sync logging-style emit() call path.
     """
 
-    def _emit(kind: str, payload: dict, call_id: str | None, source: str | None) -> None:
+    def _emit(kind: str, payload: dict, call_id: CallId | None, source: PackageName | None) -> None:
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:

@@ -19,6 +19,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from agentix.idents import CallId, MethodName, PackageName
 from agentix.models import ClosureManifest
 
 #: Type-system origins that mark a parameter or return annotation as
@@ -59,11 +60,11 @@ class RemoteRequest(BaseModel):
     `call_id` on the Socket.IO wire — same semantic.
     """
 
-    package: str
-    method: str
+    package: PackageName
+    method: MethodName
     args: list[Any] = Field(default_factory=list)
     kwargs: dict[str, Any] = Field(default_factory=dict)
-    call_id: str | None = None
+    call_id: CallId | None = None
 
 
 class RemoteError(BaseModel):
@@ -111,39 +112,12 @@ class TraceEvent(BaseModel):
     kind: str                       # e.g. "llm_request", "llm_response", "tool_call", "reward"
     payload: dict[str, Any] = Field(default_factory=dict)
     timestamp: float                # emit-time seconds since epoch
-    call_id: str | None = None      # rollout / call correlation key
-    source: str | None = None       # closure package or "runtime" that emitted this
+    call_id: CallId | None = None   # rollout / call correlation key
+    source: PackageName | None = None  # closure package or "runtime" that emitted this
 
 
-# ── Runtime I/O primitives (exec / upload / download) ───────────────
-
-
-class BashCommandRequest(BaseModel):
-    command: str
-    cwd: str | None = None
-    env: dict[str, str] | None = None
-    timeout: float | None = None
-    max_output: int | None = Field(
-        default=None,
-        description="Cap on stdout/stderr bytes for buffered exec. Default: 10 MiB.",
-    )
-    paths_from: list[str] | None = Field(
-        default=None,
-        description=(
-            "Python package paths of loaded closures whose `bin/` should be prepended "
-            "to PATH for this command. Default: PATH is the task image's default, "
-            "closure bins do not shadow it. Use ['agentix_closures.<name>'] or ['*'] "
-            "when you explicitly want a closure's tools on PATH."
-        ),
-    )
-
-
-class BashCommandResponse(BaseModel):
-    exit_code: int
-    stdout: str
-    stderr: str
-
-
-class UploadResponse(BaseModel):
-    path: str
-    size: int
+# Shell exec and file I/O used to live at this layer too (ExecRequest /
+# ExecResponse, UploadResponse). They moved to the `bash` and `files`
+# primitive closures under `primitives/`. Their request/response shapes
+# live in those closure packages (`BashResult`, `UploadResult` etc.) and
+# travel as ordinary closure dispatches over /_remote.

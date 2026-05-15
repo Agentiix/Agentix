@@ -19,6 +19,7 @@ dev = [
     "pytest>=8",
     "pytest-asyncio>=0.23",
     "ruff>=0.6",
+    "pyright>=1.1.380",
 ]
 
 [project.scripts]
@@ -40,6 +41,18 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "W", "UP"]
+
+[tool.pyright]
+# Strict mode is the goal; raise this gradually as the codebase converges
+# on the new Namespace/WirePattern shape. Today's basic mode catches the
+# obvious mistakes without drowning in advisory diagnostics.
+include = ["agentix", "primitives", "tools"]
+exclude = ["**/__pycache__", ".venv"]
+typeCheckingMode = "basic"
+pythonVersion = "3.11"
+reportMissingImports = "error"
+reportUndefinedVariable = "error"
+reportGeneralTypeIssues = "warning"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

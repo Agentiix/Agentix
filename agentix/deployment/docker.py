@@ -42,6 +42,7 @@ from uuid import uuid4
 import httpx
 
 from agentix.deployment.base import Deployment, Sandbox
+from agentix.idents import SandboxId
 from agentix.models import SandboxConfig, SandboxInfo
 
 logger = logging.getLogger("agentix.deployment.docker")
@@ -64,7 +65,7 @@ class DockerDeployment(Deployment):
     """Sandbox CRUD via local Docker."""
 
     def __init__(self):
-        self._ports: dict[str, int] = {}  # sandbox_id → host port
+        self._ports: dict[SandboxId, int] = {}  # sandbox_id → host port
         self._populated: dict[str, str] = {}  # image ref → named volume
         self._populate_lock = asyncio.Lock()
 
@@ -129,7 +130,7 @@ class DockerDeployment(Deployment):
     # ── create ───────────────────────────────────────────────────
 
     async def create(self, config: SandboxConfig) -> Sandbox:
-        sandbox_id = f"agentix-{uuid4().hex[:8]}"
+        sandbox_id = SandboxId(f"agentix-{uuid4().hex[:8]}")
         port = self._allocate_port()
 
         # Populate all closures in parallel (cached after first). Mount-dir
@@ -194,7 +195,7 @@ class DockerDeployment(Deployment):
 
     # ── get / delete ─────────────────────────────────────────────
 
-    async def get(self, sandbox_id: str) -> SandboxInfo:
+    async def get(self, sandbox_id: SandboxId) -> SandboxInfo:
         port = self._ports.get(sandbox_id)
         if port is None:
             raise KeyError(f"Sandbox not found: {sandbox_id}")
@@ -208,7 +209,7 @@ class DockerDeployment(Deployment):
             status=status,
         )
 
-    async def delete(self, sandbox_id: str) -> None:
+    async def delete(self, sandbox_id: SandboxId) -> None:
         await _docker("rm", "-f", sandbox_id, check=False)
         self._ports.pop(sandbox_id, None)
         logger.info("Deleted sandbox %s", sandbox_id)

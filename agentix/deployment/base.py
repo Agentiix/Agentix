@@ -7,6 +7,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 
+from agentix.idents import SandboxId
 from agentix.models import SandboxConfig, SandboxInfo
 
 
@@ -14,7 +15,7 @@ from agentix.models import SandboxConfig, SandboxInfo
 class Sandbox:
     """Live sandbox handle — `runtime_url` is what `RuntimeClient` connects to."""
 
-    sandbox_id: str
+    sandbox_id: SandboxId
     runtime_url: str
     status: str
 
@@ -44,11 +45,11 @@ class Deployment(ABC):
         """Create a sandbox. The caller is responsible for calling `delete()`."""
 
     @abstractmethod
-    async def delete(self, sandbox_id: str) -> None:
+    async def delete(self, sandbox_id: SandboxId) -> None:
         """Destroy a sandbox and release its resources."""
 
     @abstractmethod
-    async def get(self, sandbox_id: str) -> SandboxInfo:
+    async def get(self, sandbox_id: SandboxId) -> SandboxInfo:
         """Snapshot of the sandbox's current state."""
 
     @asynccontextmanager

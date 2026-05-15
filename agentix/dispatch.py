@@ -29,12 +29,21 @@ from typing import Any, Generic, ParamSpec, TypeVar, get_args, get_origin
 from pydantic import TypeAdapter, ValidationError
 
 import agentix.trace as trace
+from agentix.idents import MethodName, PackageName
 from agentix.models import ClosureManifest
+from agentix.namespace import Namespace, discover_methods
 from agentix.runtime.models import (
     STREAM_ORIGINS,
     RemoteError,
     RemoteRequest,
     RemoteResponse,
+)
+from agentix.wire import (
+    BidiPattern,
+    StreamPattern,
+    UnaryPattern,
+    WirePattern,
+    select_pattern,
 )
 
 logger = logging.getLogger("agentix.dispatch")
@@ -49,13 +58,21 @@ class _BoundMethod(Generic[P, R]):
     stub: Callable[P, R]
     impl: Callable[..., Any]
     signature: inspect.Signature
+    pattern: type[WirePattern]                    # wire pattern class (Unary/Stream/Bidi/…)
     param_adapters: dict[str, TypeAdapter[Any]]
     return_adapter: TypeAdapter[Any]
-    is_stream: bool = False                       # output is AsyncIterator[T]
-    item_adapter: TypeAdapter[Any] | None = None  # output item adapter
-    is_bidi: bool = False                         # input AND output are AsyncIterator[T]
-    input_stream_param: str | None = None
-    input_item_adapter: TypeAdapter[Any] | None = None
+    item_adapter: TypeAdapter[Any] | None = None  # output item adapter (stream/bidi only)
+    input_stream_param: str | None = None         # bidi: name of the AsyncIterator param
+    input_item_adapter: TypeAdapter[Any] | None = None  # bidi: input item adapter
+
+    @property
+    def is_stream(self) -> bool:
+        """True for stream and bidi — anything that emits a sequence of items."""
+        return self.pattern is StreamPattern or self.pattern is BidiPattern
+
+    @property
+    def is_bidi(self) -> bool:
+        return self.pattern is BidiPattern
 
 
 class Dispatcher:
@@ -74,7 +91,7 @@ class Dispatcher:
     """
 
     def __init__(self) -> None:
-        self._methods: dict[str, _BoundMethod[Any, Any]] = {}
+        self._methods: dict[MethodName, _BoundMethod[Any, Any]] = {}
 
     def bind(
         self,
@@ -85,12 +102,25 @@ class Dispatcher:
 
         Both must share the same signature (the stub is just the typed
         contract; impl carries the body). The wire request's `method`
-        field is `stub.__name__`.
+        field is `stub.__name__`. The `WirePattern` matching the stub's
+        signature is selected at bind time and cached.
         """
-        sig = inspect.signature(stub)
-        name = stub.__name__
+        # eval_str=True resolves PEP 563 stringified annotations (`from
+        # __future__ import annotations` in the stub module) — without it,
+        # `param.annotation` would be the string "AsyncIterator[Foo]" and
+        # `get_origin` would return None, mis-classifying streams as unary.
+        sig = inspect.signature(stub, eval_str=True)
+        # Strip a leading `self` from class-based stubs. `Namespace`
+        # stubs declare methods like `def run(self, ...)`, but the impl
+        # we bind is the bound method (self already injected). The
+        # dispatcher's signature must match the call site.
+        params = list(sig.parameters.values())
+        if params and params[0].name == "self":
+            sig = sig.replace(parameters=params[1:])
+        name = MethodName(stub.__name__)
         if name in self._methods:
             raise ValueError(f"method '{name}' already bound on this dispatcher")
+        pattern = select_pattern(sig)
 
         param_adapters: dict[str, TypeAdapter[Any]] = {}
         stream_params: list[tuple[str, type]] = []
@@ -106,62 +136,93 @@ class Dispatcher:
                 param_adapters[pname] = TypeAdapter(ann)
 
         return_ann = sig.return_annotation if sig.return_annotation is not inspect.Signature.empty else Any
-        is_stream = get_origin(return_ann) in STREAM_ORIGINS
         item_adapter: TypeAdapter[Any] | None = None
-        if is_stream:
+        input_stream_param: str | None = None
+        input_item_adapter: TypeAdapter[Any] | None = None
+        if pattern is UnaryPattern:
+            return_adapter = TypeAdapter(return_ann)
+        elif pattern is StreamPattern:
             args = get_args(return_ann)
             item_type = args[0] if args else Any
             item_adapter = TypeAdapter(item_type)
             return_adapter = TypeAdapter(Any)  # unused on streaming path
-        else:
-            return_adapter = TypeAdapter(return_ann)
-
-        is_bidi = is_stream and len(stream_params) > 0
-        input_stream_param: str | None = None
-        input_item_adapter: TypeAdapter[Any] | None = None
-        if is_bidi:
-            if len(stream_params) > 1:
-                raise TypeError(
-                    f"method '{name}' has multiple AsyncIterator parameters "
-                    f"({[p for p, _ in stream_params]}); only one input stream "
-                    f"is supported"
-                )
+        elif pattern is BidiPattern:
+            args = get_args(return_ann)
+            item_type = args[0] if args else Any
+            item_adapter = TypeAdapter(item_type)
+            # BidiPattern.matches already guaranteed exactly one stream param.
             input_stream_param, input_item_type = stream_params[0]
             input_item_adapter = TypeAdapter(input_item_type)
-        elif stream_params and not is_stream:
-            raise TypeError(
-                f"method '{name}' has AsyncIterator parameter(s) "
-                f"{[p for p, _ in stream_params]} but a non-streaming return "
-                f"type — client-only streaming is not supported; declare the "
-                f"return type as AsyncIterator[T] to use the bidi path"
-            )
+            return_adapter = TypeAdapter(Any)  # unused on streaming path
+        else:
+            # Custom pattern: framework doesn't know how to serialize. The
+            # pattern owns wire framing (via its `bind` / `client_invoke` /
+            # whatever server hook it registers). We store an `Any` adapter
+            # so the dispatcher can still bind/coerce parameters; the return
+            # path is the pattern's problem.
+            return_adapter = TypeAdapter(Any)
 
         self._methods[name] = _BoundMethod(
             name=name,
             stub=stub,
             impl=impl,
             signature=sig,
+            pattern=pattern,
             param_adapters=param_adapters,
             return_adapter=return_adapter,
-            is_stream=is_stream,
             item_adapter=item_adapter,
-            is_bidi=is_bidi,
             input_stream_param=input_stream_param,
             input_item_adapter=input_item_adapter,
         )
 
-    def methods(self) -> list[str]:
+    def bind_namespace(
+        self,
+        stub_cls: type[Namespace],
+        impl: object,
+    ) -> Dispatcher:
+        """Bind every public method of `stub_cls` to its `impl` counterpart.
+
+        Stub and impl are **independent classes** — composition, not
+        inheritance. For each method discovered on `stub_cls`, the
+        dispatcher looks up the same-named attribute on `impl` and
+        binds the pair. Missing methods on `impl` raise immediately.
+
+        Static type-checking that `impl` actually satisfies the stub is
+        opt-in: declare the stub as a `Protocol` and annotate `impl: Stub`
+        in `_register.py`. The framework checks signature drift at CI
+        time via `tools/check_stub_impl.py`.
+
+        Returns `self` for fluent use in `_register.register()`.
+        """
+        missing: list[str] = []
+        bound_pairs: list[tuple[Callable[..., Any], Callable[..., Any]]] = []
+        for name, stub_fn in discover_methods(stub_cls):
+            impl_fn = getattr(impl, name, None)
+            if impl_fn is None or not callable(impl_fn):
+                missing.append(name)
+                continue
+            bound_pairs.append((stub_fn, impl_fn))
+        if missing:
+            raise TypeError(
+                f"impl {type(impl).__name__} is missing method(s) declared on "
+                f"stub {stub_cls.__name__}: {missing}"
+            )
+        for stub_fn, impl_fn in bound_pairs:
+            self.bind(stub_fn, impl_fn)
+        return self
+
+    def methods(self) -> list[MethodName]:
         return list(self._methods)
 
-    def is_streaming(self, method: str) -> bool:
+    def is_streaming(self, method: MethodName) -> bool:
         m = self._methods.get(method)
         return m is not None and m.is_stream
 
-    def is_bidi(self, method: str) -> bool:
+    def is_bidi(self, method: MethodName) -> bool:
         m = self._methods.get(method)
         return m is not None and m.is_bidi
 
-    def input_adapter_for(self, method: str) -> TypeAdapter[Any] | None:
+    def input_adapter_for(self, method: MethodName) -> TypeAdapter[Any] | None:
         m = self._methods.get(method)
         return m.input_item_adapter if m else None
 
@@ -386,7 +447,7 @@ class Dispatcher:
         return out_args, out_kwargs
 
 
-def _source_for(impl: Callable[..., Any]) -> str | None:
+def _source_for(impl: Callable[..., Any]) -> PackageName | None:
     """Derive a closure package path from an impl function for trace events.
 
     Closure impls live at `agentix_closures.<name>._impl`; strip the `._impl`
@@ -395,7 +456,7 @@ def _source_for(impl: Callable[..., Any]) -> str | None:
     mod = getattr(impl, "__module__", None)
     if mod is None:
         return None
-    return mod[:-6] if mod.endswith("._impl") else mod
+    return PackageName(mod[:-6] if mod.endswith("._impl") else mod)
 
 
 @dataclass
@@ -423,9 +484,9 @@ class Registry:
     """
 
     def __init__(self) -> None:
-        self._entries: dict[str, _Entry] = {}
+        self._entries: dict[PackageName, _Entry] = {}
 
-    def register(self, package: str, manifest: ClosureManifest, mount: Path) -> None:
+    def register(self, package: PackageName, manifest: ClosureManifest, mount: Path) -> None:
         """Mark a closure as known but not yet loaded. Adds the closure's
         `entry/python` to sys.path so the stub module becomes importable —
         the Dispatcher is still deferred.
@@ -439,7 +500,7 @@ class Registry:
                 sys.path.insert(0, py_str)
         self._entries[package] = _Entry(manifest=manifest, mount=mount)
 
-    async def get_or_load(self, package: str) -> Dispatcher | None:
+    async def get_or_load(self, package: PackageName) -> Dispatcher | None:
         """Return the dispatcher for `package`, importing + registering it
         on first call. Returns None for unknown packages. Re-raises the
         original exception on every call if the load has previously failed.
@@ -467,23 +528,23 @@ class Registry:
                 raise
             return entry.dispatcher
 
-    def packages(self) -> list[str]:
+    def packages(self) -> list[PackageName]:
         """All known packages — registered, regardless of load state."""
         return list(self._entries)
 
-    def loaded_packages(self) -> list[str]:
+    def loaded_packages(self) -> list[PackageName]:
         """Packages whose dispatcher has been built (post first-use)."""
         return [pkg for pkg, e in self._entries.items() if e.dispatcher is not None]
 
-    def manifest_for(self, package: str) -> ClosureManifest | None:
+    def manifest_for(self, package: PackageName) -> ClosureManifest | None:
         e = self._entries.get(package)
         return e.manifest if e else None
 
-    def mount_for(self, package: str) -> Path | None:
+    def mount_for(self, package: PackageName) -> Path | None:
         e = self._entries.get(package)
         return e.mount if e else None
 
-    def __contains__(self, package: str) -> bool:
+    def __contains__(self, package: PackageName) -> bool:
         return package in self._entries
 
 
