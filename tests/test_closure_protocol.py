@@ -29,6 +29,70 @@ async def test_auto_load_registers_package(runtime_module, mount_echo):
     assert server.registry.packages() == ["agentix_closures.echo"]
 
 
+async def test_auto_load_handles_bundle_mount(runtime_module, mount_bundle):
+    """A mount with `entry/bundle.json` registers every nested closure."""
+    server, _root, _up = runtime_module
+    mount_bundle("agent-bundle", closures={
+        "echo": dict(
+            package="agentix_closures.echo",
+            init_src=textwrap.dedent("""
+                from dataclasses import dataclass
+                @dataclass
+                class EchoResult: msg: str
+                def echo(msg: str) -> EchoResult: ...
+            """),
+            impl_src=textwrap.dedent("""
+                from . import EchoResult
+                def echo(msg): return EchoResult(msg=f"echo:{msg}")
+            """),
+            register_src=textwrap.dedent("""
+                from agentix.dispatch import Dispatcher
+                from . import echo
+                from ._impl import echo as _echo
+                def register():
+                    d = Dispatcher(); d.bind(echo, _echo); return d
+            """),
+        ),
+        "greet": dict(
+            package="agentix_closures.greet",
+            init_src=textwrap.dedent("""
+                from dataclasses import dataclass
+                @dataclass
+                class Hi: text: str
+                def hi(name: str) -> Hi: ...
+            """),
+            impl_src=textwrap.dedent("""
+                from . import Hi
+                def hi(name): return Hi(text=f"hi {name}")
+            """),
+            register_src=textwrap.dedent("""
+                from agentix.dispatch import Dispatcher
+                from . import hi
+                from ._impl import hi as _hi
+                def register():
+                    d = Dispatcher(); d.bind(hi, _hi); return d
+            """),
+        ),
+    })
+    await server._auto_load()
+    assert set(server.registry.packages()) == {
+        "agentix_closures.echo",
+        "agentix_closures.greet",
+    }
+    # Each closure's entry path is the nested directory, not the parent mount.
+    echo_entry = server.registry.entry_for("agentix_closures.echo")
+    assert echo_entry is not None and echo_entry.name == "echo"
+    assert (echo_entry / "manifest.json").is_file()
+    # Lazy dispatch through the registry works for both nested entries.
+    d_echo = await server.registry.get_or_load("agentix_closures.echo")
+    assert d_echo is not None
+    resp = await d_echo.dispatch(RemoteRequest(
+        package="agentix_closures.echo", method="echo",
+        args=[], kwargs={"msg": "hi"},
+    ))
+    assert resp.ok and resp.value == {"msg": "echo:hi"}
+
+
 async def test_auto_load_skips_runtime_dir(runtime_module, mount_root_setup, mount_echo):
     """A mount named 'runtime' is reserved and skipped."""
     server, _root, _up = runtime_module

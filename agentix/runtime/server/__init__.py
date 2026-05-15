@@ -22,7 +22,6 @@ Public names re-exported here so legacy imports keep working:
 from agentix.runtime.server.app import (
     CLOSURE_MOUNT_ROOT,
     _auto_load,
-    _read_manifest,
     app,
     main,
     registry,
@@ -31,7 +30,6 @@ from agentix.runtime.server.app import (
 __all__ = [
     "CLOSURE_MOUNT_ROOT",
     "_auto_load",
-    "_read_manifest",
     "app",
     "main",
     "registry",

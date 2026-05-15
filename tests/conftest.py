@@ -159,6 +159,53 @@ ECHO_REGISTER = textwrap.dedent(
 
 
 @pytest.fixture
+def mount_bundle(runtime_module) -> Callable[..., Path]:
+    """Lay out a bundle mount: one mount, multiple closures under entry/.
+
+    `<mount>/entry/bundle.json` marks the mount as a bundle; each member
+    closure lives at `<mount>/entry/<short>/{manifest.json, python/}`.
+
+    Usage:
+        mount_bundle("agent-bundle", closures={
+            "echo": dict(package="agentix_closures.echo", init_src=..., impl_src=..., register_src=...),
+            "greet": dict(...),
+        })
+    """
+    server, mount_root, _ = runtime_module
+
+    def _mount(dirname: str, *, closures: dict[str, dict]) -> Path:
+        mount = mount_root / dirname
+        entry = mount / "entry"
+        entry.mkdir(parents=True)
+        (entry / "bundle.json").write_text(json.dumps({
+            "abi": 1,
+            "kind": "bundle",
+            "closures": list(closures.keys()),
+        }))
+        for short, spec in closures.items():
+            sub = entry / short
+            sub.mkdir()
+            package = spec["package"]
+            manifest = {
+                "abi": spec.get("abi", 1),
+                "name": package.rsplit(".", 1)[-1].replace("_", "-"),
+                "version": spec.get("version", "0.1.0"),
+                "package": package,
+            }
+            (sub / "manifest.json").write_text(json.dumps(manifest))
+            _write_pkg(
+                sub / "python",
+                package=package,
+                init_src=spec["init_src"],
+                impl_src=spec["impl_src"],
+                register_src=spec["register_src"],
+            )
+        return mount
+
+    return _mount
+
+
+@pytest.fixture
 def mount_echo(mount_package) -> Callable[..., Path]:
     """Mount the canonical 'echo' closure used across many tests.
 

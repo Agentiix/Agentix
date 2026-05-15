@@ -461,10 +461,18 @@ def _source_for(impl: Callable[..., Any]) -> PackageName | None:
 
 @dataclass
 class _Entry:
-    """One registered closure. `dispatcher` is built lazily on first use."""
+    """One registered closure. `dispatcher` is built lazily on first use.
+
+    `entry_path` is the directory that contains the closure's `manifest.json`
+    and (next to it) `python/` and optional `bin/`. For a single-closure
+    image the entry path is `<mount>/entry`; for a bundle image the same
+    closure's entry path is `<mount>/entry/<sub>/`. Code that reaches for
+    the closure's bin dir should always do `entry_path / "bin"` so it works
+    in both shapes.
+    """
 
     manifest: ClosureManifest
-    mount: Path
+    entry_path: Path
     dispatcher: Dispatcher | None = None
     error: Exception | None = None
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -486,19 +494,27 @@ class Registry:
     def __init__(self) -> None:
         self._entries: dict[PackageName, _Entry] = {}
 
-    def register(self, package: PackageName, manifest: ClosureManifest, mount: Path) -> None:
-        """Mark a closure as known but not yet loaded. Adds the closure's
-        `entry/python` to sys.path so the stub module becomes importable —
-        the Dispatcher is still deferred.
+    def register(
+        self,
+        package: PackageName,
+        manifest: ClosureManifest,
+        entry_path: Path,
+    ) -> None:
+        """Mark a closure as known but not yet loaded.
+
+        `entry_path` is the directory that holds the closure's
+        `manifest.json` (and `python/`, optional `bin/`, etc.). Adds
+        `entry_path/python` to sys.path so the stub module becomes
+        importable — the Dispatcher build is still deferred.
         """
         if package in self._entries:
             raise ValueError(f"package '{package}' already registered")
-        py_root = mount / "entry" / "python"
+        py_root = entry_path / "python"
         if py_root.is_dir():
             py_str = str(py_root)
             if py_str not in sys.path:
                 sys.path.insert(0, py_str)
-        self._entries[package] = _Entry(manifest=manifest, mount=mount)
+        self._entries[package] = _Entry(manifest=manifest, entry_path=entry_path)
 
     async def get_or_load(self, package: PackageName) -> Dispatcher | None:
         """Return the dispatcher for `package`, importing + registering it
@@ -540,9 +556,14 @@ class Registry:
         e = self._entries.get(package)
         return e.manifest if e else None
 
-    def mount_for(self, package: PackageName) -> Path | None:
+    def entry_for(self, package: PackageName) -> Path | None:
+        """The directory holding the closure's manifest.json + python/ + bin/.
+
+        Works the same for single-closure images (one entry per mount) and
+        for bundle images (multiple entries nested under one mount).
+        """
         e = self._entries.get(package)
-        return e.mount if e else None
+        return e.entry_path if e else None
 
     def __contains__(self, package: PackageName) -> bool:
         return package in self._entries

@@ -54,50 +54,88 @@ registry = Registry()
 async def _auto_load() -> None:
     """Scan /mnt for closures and register each one as a pending entry.
 
-    Does NOT import any closure packages or build any Dispatchers — that
-    work happens lazily on first `/_remote` call (see `Registry.get_or_load`).
-    Cheap manifest validation is sufficient at boot to fail loudly on a
-    malformed mount while keeping startup latency flat.
+    Supports two on-disk shapes per mount:
 
-    `/mnt/runtime` is reserved (the runtime itself) and skipped.
+      Single closure (canonical layout):
+        <mount>/entry/manifest.json
+        <mount>/entry/python/...
+
+      Bundle (multiple closures packed into one image, produced by
+      `agentix install`):
+        <mount>/entry/bundle.json
+        <mount>/entry/<closure_a>/manifest.json
+        <mount>/entry/<closure_a>/python/...
+        <mount>/entry/<closure_b>/manifest.json
+        ...
+
+    Either way the unit we register is the *entry path* — the directory
+    containing `manifest.json`. The Registry tracks that path so callers
+    that reach for the closure's `bin/` use `entry_path / "bin"` and
+    work in either shape.
+
+    Does NOT import any closure packages or build any Dispatchers — that
+    work happens lazily on first `/_remote` call. `/mnt/runtime` is
+    reserved (the runtime itself) and skipped.
     """
     if not CLOSURE_MOUNT_ROOT.is_dir():
         return
     for mount in sorted(CLOSURE_MOUNT_ROOT.iterdir()):
         if mount.name == "runtime" or not mount.is_dir():
             continue
-        manifest = _read_manifest(mount)
-        if manifest is None:
-            continue
-        if manifest.package in registry:
-            logger.error(
-                "skip mount %s: package %r already registered from %s",
-                mount, manifest.package, registry.mount_for(manifest.package),
-            )
-            continue
-        registry.register(manifest.package, manifest, mount)
-        logger.info("registered closure '%s' from %s (deferred)",
-                    manifest.package, mount)
+        for entry_path in _iter_entry_dirs(mount):
+            manifest = _read_manifest_at(entry_path)
+            if manifest is None:
+                continue
+            if manifest.package in registry:
+                logger.error(
+                    "skip %s: package %r already registered from %s",
+                    entry_path, manifest.package,
+                    registry.entry_for(manifest.package),
+                )
+                continue
+            registry.register(manifest.package, manifest, entry_path)
+            logger.info("registered closure '%s' from %s (deferred)",
+                        manifest.package, entry_path)
 
 
-def _read_manifest(mount: Path) -> ClosureManifest | None:
-    """Read and validate <mount>/entry/manifest.json."""
-    mf_path = mount / "entry" / "manifest.json"
+def _iter_entry_dirs(mount: Path) -> list[Path]:
+    """Return the entry path(s) carried by a mount.
+
+    A mount with `<mount>/entry/bundle.json` is a bundle and yields each
+    `<mount>/entry/<sub>/` that itself contains a `manifest.json`. A
+    mount with `<mount>/entry/manifest.json` is a single closure and
+    yields `<mount>/entry` once.
+    """
+    entry_root = mount / "entry"
+    if not entry_root.is_dir():
+        logger.warning("skip mount %s: missing entry/", mount)
+        return []
+    if (entry_root / "bundle.json").is_file():
+        return [d for d in sorted(entry_root.iterdir())
+                if d.is_dir() and (d / "manifest.json").is_file()]
+    return [entry_root]
+
+
+def _read_manifest_at(entry_path: Path) -> ClosureManifest | None:
+    """Read and validate `<entry_path>/manifest.json`."""
+    mf_path = entry_path / "manifest.json"
     if not mf_path.is_file():
-        logger.warning("skip mount %s: missing entry/manifest.json", mount)
+        logger.warning("skip %s: missing manifest.json", entry_path)
         return None
     try:
         manifest = ClosureManifest.model_validate_json(mf_path.read_text())
     except ValidationError as exc:
-        logger.error("skip mount %s: invalid manifest.json: %s", mount, exc)
+        logger.error("skip %s: invalid manifest.json: %s", entry_path, exc)
         return None
     if manifest.abi != AGENTIX_CLOSURE_ABI:
         logger.warning(
-            "skip mount %s: abi=%d, runtime supports %d",
-            mount, manifest.abi, AGENTIX_CLOSURE_ABI,
+            "skip %s: abi=%d, runtime supports %d",
+            entry_path, manifest.abi, AGENTIX_CLOSURE_ABI,
         )
         return None
     return manifest
+
+
 
 
 @asynccontextmanager
@@ -125,10 +163,10 @@ async def list_closures() -> list[ClosureInfo]:
     out: list[ClosureInfo] = []
     for pkg in registry.packages():
         manifest = registry.manifest_for(pkg)
-        mount = registry.mount_for(pkg)
-        if manifest is None or mount is None:
+        entry = registry.entry_for(pkg)
+        if manifest is None or entry is None:
             continue
-        out.append(ClosureInfo(path=str(mount), manifest=manifest))
+        out.append(ClosureInfo(path=str(entry), manifest=manifest))
     return out
 
 

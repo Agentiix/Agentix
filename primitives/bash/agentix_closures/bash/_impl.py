@@ -68,9 +68,9 @@ def _resolve_closure_bins(packages: list[str]) -> list[str]:
     pkg_list = registry.packages() if packages == ["*"] else packages
     out: list[str] = []
     for pkg in pkg_list:
-        mount = registry.mount_for(pkg)
-        if mount is not None:
-            out.append(str(mount / "entry" / "bin"))
+        entry = registry.entry_for(pkg)
+        if entry is not None:
+            out.append(str(entry / "bin"))
     return out
 
 
