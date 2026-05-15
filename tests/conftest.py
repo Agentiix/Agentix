@@ -37,7 +37,13 @@ def runtime_module(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("AGENTIX_CLOSURE_MOUNT_ROOT", str(mount_root))
     monkeypatch.setenv("AGENTIX_UPLOAD_ROOT", str(upload_root))
 
-    for mod in ("agentix.runtime.builtins", "agentix.runtime.server"):
+    # Reload in dependency order: leaves first, package __init__ last.
+    for mod in (
+        "agentix.runtime.server.builtins",
+        "agentix.runtime.server.sio",
+        "agentix.runtime.server.app",
+        "agentix.runtime.server",
+    ):
         if mod in sys.modules:
             importlib.reload(sys.modules[mod])
 

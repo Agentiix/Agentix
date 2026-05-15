@@ -73,7 +73,7 @@ def _resolve_closure_bins(packages: list[str]) -> list[str]:
     `["*"]` expands to every currently-registered closure. Unknown packages
     are silently dropped.
     """
-    from agentix.runtime.server import registry
+    from agentix.runtime.server.app import registry
 
     pkg_list = registry.packages() if packages == ["*"] else packages
     out: list[str] = []

@@ -31,7 +31,11 @@ from pydantic import TypeAdapter, ValidationError
 
 from agentix.models import ClosureManifest, RemoteError, RemoteRequest, RemoteResponse
 
-_STREAM_ORIGINS = (cabc.AsyncIterator, cabc.AsyncGenerator)
+#: Type origins that indicate a streaming param or return annotation
+#: (`AsyncIterator[T]` / `AsyncGenerator[T, ...]`). Shared between the
+#: server-side bind detection here and the client-side route selection in
+#: `agentix.runtime.client` — single source of truth for what "streams".
+STREAM_ORIGINS: tuple[type, ...] = (cabc.AsyncIterator, cabc.AsyncGenerator)
 
 logger = logging.getLogger("agentix.dispatch")
 
@@ -92,7 +96,7 @@ class Dispatcher:
         stream_params: list[tuple[str, type]] = []
         for pname, param in sig.parameters.items():
             ann = param.annotation if param.annotation is not inspect.Parameter.empty else Any
-            if get_origin(ann) in _STREAM_ORIGINS:
+            if get_origin(ann) in STREAM_ORIGINS:
                 # AsyncIterator[T] params: adapter validates items, not the iterator
                 args = get_args(ann)
                 item_type = args[0] if args else Any
@@ -102,7 +106,7 @@ class Dispatcher:
                 param_adapters[pname] = TypeAdapter(ann)
 
         return_ann = sig.return_annotation if sig.return_annotation is not inspect.Signature.empty else Any
-        is_stream = get_origin(return_ann) in _STREAM_ORIGINS
+        is_stream = get_origin(return_ann) in STREAM_ORIGINS
         item_adapter: TypeAdapter[Any] | None = None
         if is_stream:
             args = get_args(return_ann)

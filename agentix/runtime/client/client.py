@@ -19,7 +19,6 @@ on the same client. Per-`call_id` queue routing demultiplexes concurrent calls.
 from __future__ import annotations
 
 import asyncio
-import collections.abc as cabc
 import contextlib
 import inspect
 import json
@@ -42,6 +41,7 @@ import httpx
 import socketio
 from pydantic import TypeAdapter
 
+from agentix.dispatch import STREAM_ORIGINS
 from agentix.models import (
     ClosureInfo,
     ExecRequest,
@@ -59,8 +59,6 @@ logger = logging.getLogger("agentix.client")
 P = ParamSpec("P")
 R = TypeVar("R")
 T = TypeVar("T")
-
-_STREAM_ORIGINS = (cabc.AsyncIterator, cabc.AsyncGenerator)
 
 
 class RemoteCallError(RuntimeError):
@@ -156,9 +154,9 @@ class RuntimeClient:
           value; use `await c.remote(fn, ...)`.
         """
         sig = inspect.signature(fn)
-        output_is_stream = get_origin(sig.return_annotation) in _STREAM_ORIGINS
+        output_is_stream = get_origin(sig.return_annotation) in STREAM_ORIGINS
         input_is_stream = any(
-            get_origin(p.annotation) in _STREAM_ORIGINS
+            get_origin(p.annotation) in STREAM_ORIGINS
             for p in sig.parameters.values()
             if p.annotation is not inspect.Parameter.empty
         )
@@ -230,7 +228,7 @@ class RuntimeClient:
         stream_param: str | None = None
         in_item_type: Any = Any
         for pname, param in sig.parameters.items():
-            if get_origin(param.annotation) in _STREAM_ORIGINS:
+            if get_origin(param.annotation) in STREAM_ORIGINS:
                 stream_param = pname
                 in_args = get_args(param.annotation)
                 in_item_type = in_args[0] if in_args else Any

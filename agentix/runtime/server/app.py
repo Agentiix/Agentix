@@ -41,8 +41,8 @@ from agentix.models import (
     RemoteRequest,
     RemoteResponse,
 )
-from agentix.runtime.builtins import router as builtins_router
-from agentix.runtime.sio import make_sio
+from agentix.runtime.server.builtins import router as builtins_router
+from agentix.runtime.server.sio import make_sio
 
 logger = logging.getLogger("agentix.runtime")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message)s")
