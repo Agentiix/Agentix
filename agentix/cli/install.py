@@ -34,101 +34,14 @@ import json
 import shutil
 import subprocess
 import sys
-import tomllib
 from collections.abc import Sequence
-from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Literal
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+from agentix.cli._resolve import REPO_ROOT, ClosureSpec, resolve_spec
+
 TEMPLATE_DIR = REPO_ROOT / "primitives" / "_template"
 GEN_MANIFEST = REPO_ROOT / "tools" / "gen_manifest.py"
-EXTENSION_ROOTS = ("primitives", "agents", "datasets")
-CLOSURE_KINDS = ("primitive", "agent", "dataset")
-
-
-@dataclass
-class ClosureSpec:
-    """One resolved input to the bundle. Exactly one source field is set."""
-
-    short: str               # the short name written into bundle.json
-    kind: Literal["path", "pypi", "image"]
-    path: Path | None = None
-    pypi_dist: str | None = None
-    image_ref: str | None = None
-
-
-def _looks_like_image_ref(spec: str) -> bool:
-    """Heuristic: `name/something:tag` is an image ref; `./foo` or bare
-    names are not. Conservative — bare `:` without a `/` is ambiguous and
-    treated as a name."""
-    return "/" in spec and ":" in spec and not spec.startswith((".", "/"))
-
-
-def _looks_like_path(spec: str) -> bool:
-    if spec.startswith((".", "/")):
-        return True
-    p = Path(spec)
-    return p.is_dir() and (p / "pyproject.toml").is_file()
-
-
-def _find_local(name: str) -> Path | None:
-    """Look up `<root>/<name>/` under each extension root in the repo."""
-    for root in EXTENSION_ROOTS:
-        candidate = REPO_ROOT / root / name
-        if candidate.is_dir() and (candidate / "pyproject.toml").is_file():
-            return candidate
-    return None
-
-
-def resolve_spec(spec: str) -> ClosureSpec:
-    if _looks_like_path(spec):
-        p = Path(spec).resolve()
-        if not (p / "pyproject.toml").is_file():
-            raise SystemExit(f"{spec}: no pyproject.toml — not a closure source dir")
-        pyproject = _read_pyproject(p)
-        short = _short_from_pyproject(pyproject)
-        return ClosureSpec(short=short, kind="path", path=p)
-    if _looks_like_image_ref(spec):
-        # No actual docker pull / extract today — surface this loudly.
-        return ClosureSpec(short=_short_from_image(spec), kind="image", image_ref=spec)
-    # Short name: local first, then PyPI.
-    local = _find_local(spec)
-    if local is not None:
-        return ClosureSpec(short=spec, kind="path", path=local)
-    # No local match → PyPI. Defer the actual fetch to build time;
-    # resolution is best-effort here.
-    return ClosureSpec(
-        short=spec, kind="pypi", pypi_dist=f"agentix-???-{spec}",
-    )
-
-
-def _read_pyproject(closure_dir: Path) -> dict:
-    with (closure_dir / "pyproject.toml").open("rb") as f:
-        return tomllib.load(f)
-
-
-def _short_from_pyproject(pyproject: dict) -> str:
-    """`agentix-primitive-bash` → `bash`."""
-    name = pyproject.get("project", {}).get("name", "")
-    if not isinstance(name, str) or not name.startswith("agentix-"):
-        raise SystemExit(f"pyproject.toml: name {name!r} must start with `agentix-`")
-    parts = name.split("-")
-    if len(parts) < 3:
-        raise SystemExit(f"pyproject.toml: name {name!r} expected `agentix-<kind>-<short>`")
-    return parts[-1]
-
-
-def _short_from_image(ref: str) -> str:
-    """`docker.io/me/agentix/primitive-bash:0.1.0` → `bash`."""
-    # Take last path segment, strip tag, strip leading agentix-<kind>- prefix.
-    last = ref.rsplit("/", 1)[-1].rsplit(":", 1)[0]
-    for kind in CLOSURE_KINDS:
-        pre = f"agentix-{kind}-"
-        if last.startswith(pre):
-            return last[len(pre):]
-    return last  # best effort
 
 
 def _stage_bundle(
@@ -249,26 +162,31 @@ def main(argv: Sequence[str] | None = None) -> int:
     if dupes:
         raise SystemExit(f"duplicate closure short names: {sorted(dupes)}")
 
-    if args.dry_run:
-        out = REPO_ROOT / "build" / bundle_name.rsplit("/", 1)[-1]
-        if out.exists():
-            shutil.rmtree(out)
-        out.mkdir(parents=True)
-        _stage_bundle(bundle_name, bundle_version, specs, out)
-        print(f"staged bundle build context → {out}")
-        print(f"would build → {args.output}")
-        print(f"  closures: {', '.join(shorts)}")
-        return 0
+    try:
+        if args.dry_run:
+            out = REPO_ROOT / "build" / bundle_name.rsplit("/", 1)[-1]
+            if out.exists():
+                shutil.rmtree(out)
+            out.mkdir(parents=True)
+            _stage_bundle(bundle_name, bundle_version, specs, out)
+            print(f"staged bundle build context → {out}")
+            print(f"would build → {args.output}")
+            print(f"  closures: {', '.join(shorts)}")
+            return 0
 
-    with TemporaryDirectory(prefix="agentix-bundle-") as tmp:
-        build_dir = Path(tmp)
-        _stage_bundle(bundle_name, bundle_version, specs, build_dir)
-        print(f"building {args.output}…", file=sys.stderr)
-        proc = subprocess.run(
-            ["docker", "build", "-t", args.output, str(build_dir)],
-            check=False,
-        )
-        return proc.returncode
+        with TemporaryDirectory(prefix="agentix-bundle-") as tmp:
+            build_dir = Path(tmp)
+            _stage_bundle(bundle_name, bundle_version, specs, build_dir)
+            print(f"building {args.output}…", file=sys.stderr)
+            proc = subprocess.run(
+                ["docker", "build", "-t", args.output, str(build_dir)],
+                check=False,
+            )
+            return proc.returncode
+    except NotImplementedError as exc:
+        # PyPI / image-ref sourcing are not wired yet — surface a clean
+        # one-liner instead of a traceback.
+        raise SystemExit(f"error: {exc}") from exc
 
 
 if __name__ == "__main__":

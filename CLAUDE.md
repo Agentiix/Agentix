@@ -78,7 +78,7 @@ agentix check primitives/                              # stub ↔ impl signature
 
 Each command is a thin module under `agentix/cli/`; `agentix --help` lists them. Every subcommand has `--dry-run` where staging dominates.
 
-**`agentix build <dir>`** — builds a single closure. Stages closure source + shared Dockerfile/nix/gen_manifest into a temp dir, runs `docker build`.
+**`agentix build <spec>`** — builds a single closure. `<spec>` is the same shape `install` accepts: an explicit path (`primitives/bash`), a short name resolved against `primitives/agents/datasets/` in the repo (`bash`), or a PyPI distribution (stubbed). Stages closure source + shared Dockerfile/nix/gen_manifest into a temp dir, runs `docker build`. Image refs aren't valid here — they're already built.
 
 **`agentix install <names> -o <tag>`** — bundles multiple closures into one image. Each spec resolves in order: existing local path, then conventional `primitives/<n>` / `agents/<n>` / `datasets/<n>` in the repo, then PyPI as `agentix-<kind>-<n>` (PyPI fetch + extract is stubbed — local resolution works today), then a `host/name:tag` image ref (also stubbed). The bundle image carries `/nix/entry/bundle.json` so the runtime's `_auto_load` registers every nested closure on boot.
 

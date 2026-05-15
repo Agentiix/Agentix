@@ -1,24 +1,29 @@
-"""`agentix build` — build a closure image from `primitives/<name>/`.
+"""`agentix build` — build a single closure image.
 
 Usage:
 
-    agentix build primitives/bash
-    agentix build primitives/files --tag agentix/primitive-files:dev
-    agentix build primitives/bash --dry-run    # stage context, no docker
+    agentix build primitives/bash                      # explicit path
+    agentix build bash                                 # short name → primitives/bash
+    agentix build claude-code                          # short name → agents/claude-code
+    agentix build agentix-primitive-bash               # PyPI dist (stubbed)
+    agentix build primitives/bash --tag my-bash:dev
+    agentix build primitives/bash --dry-run
 
-A closure's source directory is the minimum-viable layout:
+The argument accepts the same spec format as `agentix install`: an
+explicit path, a short name resolved against `primitives/agents/datasets/`
+in the repo, or a PyPI distribution (`agentix install` and PyPI fetching
+both stub the PyPI path with a clear NotImplementedError today).
 
-    primitives/<name>/
-    ├── pyproject.toml                # all metadata (name, version, description)
+A closure's minimum-viable source layout:
+
+    <closure_dir>/
+    ├── pyproject.toml            # all metadata (name, version, description)
     └── agentix_closures/<name>/
-        ├── __init__.py               # stub class
-        └── _impl.py                  # impl class
+        ├── __init__.py           # stub class
+        └── _impl.py              # impl class
 
 Everything else — Dockerfile, default.nix, manifest.json — is shared
 infrastructure pulled in from `primitives/_template/` and `tools/`.
-This script stages a self-contained build context in a temp dir, copies
-the templates next to the closure source, and runs `docker build`. The
-closure dir never has to carry build-time boilerplate.
 """
 
 from __future__ import annotations
@@ -27,27 +32,14 @@ import argparse
 import shutil
 import subprocess
 import sys
-import tomllib
 from collections.abc import Sequence
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-# `agentix.cli.build` lives inside the installed framework; the templates +
-# gen_manifest tool live alongside the repo root. Walk up two levels from
-# this file (agentix/cli/build.py → repo) to find them when running from a
-# dev checkout. In an installed wheel these files don't ship, so
-# `agentix build` is a dev-time tool by design.
-REPO_ROOT = Path(__file__).resolve().parents[2]
+from agentix.cli._resolve import REPO_ROOT, ClosureSpec, read_pyproject, resolve_spec
+
 TEMPLATE_DIR = REPO_ROOT / "primitives" / "_template"
 GEN_MANIFEST = REPO_ROOT / "tools" / "gen_manifest.py"
-
-
-def _load_pyproject(closure_dir: Path) -> dict:
-    pp = closure_dir / "pyproject.toml"
-    if not pp.is_file():
-        raise SystemExit(f"{closure_dir}: missing pyproject.toml")
-    with pp.open("rb") as f:
-        return tomllib.load(f)
 
 
 def _derive_tag(pyproject: dict) -> str:
@@ -69,6 +61,32 @@ def _derive_tag(pyproject: dict) -> str:
     return f"agentix/{short}:{version}"
 
 
+def _materialize_path(spec: ClosureSpec) -> Path:
+    """Return the on-disk closure source dir for `spec`.
+
+    `path` kinds are already on disk and used as-is. `pypi` would do
+    `pip download` + wheel unpack into a temp dir — not yet wired.
+    `image` doesn't make sense for `build`: the artifact is already
+    built; the user wanted `agentix deploy` or `agentix install --no-rebuild`.
+    """
+    if spec.kind == "path":
+        assert spec.path is not None
+        return spec.path
+    if spec.kind == "pypi":
+        raise NotImplementedError(
+            f"`agentix build {spec.short}`: PyPI sourcing not wired yet. "
+            f"The build pipeline needs a `pip download {spec.pypi_dist}` + "
+            f"wheel unpack step before the closure dir is ready. Use a local "
+            f"path or check that the closure lives under primitives/, "
+            f"agents/, or datasets/ in this repo."
+        )
+    raise SystemExit(
+        f"`agentix build {spec.short}`: image refs aren't a valid input — "
+        f"that image already exists. Try `agentix deploy local --image {spec.image_ref}` "
+        f"or include it in `agentix install`."
+    )
+
+
 def _stage(closure_dir: Path, build_dir: Path) -> None:
     """Copy closure source + shared build infra into a self-contained context."""
     shutil.copytree(
@@ -87,17 +105,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("closure_dir", type=Path, help="path to primitives/<name>/")
+    parser.add_argument("spec", help="closure short name or path (e.g. bash, primitives/bash)")
     parser.add_argument("--tag", type=str, default=None,
                         help="override the derived docker image tag")
     parser.add_argument("--dry-run", action="store_true",
-                        help="stage the build context to ./build/<name>/ and print path; "
-                             "do NOT invoke docker")
+                        help="stage to ./build/<name>/ and print the path; do NOT invoke docker")
     args = parser.parse_args(argv)
 
-    if not args.closure_dir.is_dir():
-        raise SystemExit(f"{args.closure_dir}: not a directory")
-    pyproject = _load_pyproject(args.closure_dir)
+    spec = resolve_spec(args.spec)
+    try:
+        closure_dir = _materialize_path(spec)
+    except NotImplementedError as exc:
+        # Convert to SystemExit so argparse-style stderr message + exit-1
+        # behaviour matches the rest of the CLI.
+        raise SystemExit(f"error: {exc}") from exc
+    pyproject = read_pyproject(closure_dir)
     tag = args.tag or _derive_tag(pyproject)
     short_name = pyproject["project"]["name"].rsplit("-", 1)[-1]
 
@@ -106,15 +128,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         if out.exists():
             shutil.rmtree(out)
         out.mkdir(parents=True)
-        _stage(args.closure_dir, out)
+        _stage(closure_dir, out)
         print(f"staged build context → {out}")
         print(f"would build → {tag}")
         return 0
 
     with TemporaryDirectory(prefix=f"agentix-build-{short_name}-") as tmp:
         build_dir = Path(tmp)
-        _stage(args.closure_dir, build_dir)
-        print(f"building {tag} from {args.closure_dir}…", file=sys.stderr)
+        _stage(closure_dir, build_dir)
+        print(f"building {tag} from {closure_dir}…", file=sys.stderr)
         proc = subprocess.run(
             [
                 "docker", "build",
