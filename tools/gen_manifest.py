@@ -35,9 +35,9 @@ def _derive_package(pyproject: dict) -> str:
     """Pull the Python import path from `[tool.hatch.build.targets.wheel] packages`.
 
     Hatchling's `packages` entries are filesystem paths *in the source*,
-    e.g. `src/agentix_primitive_bash`. The wheel layout strips the leading
-    `src/` (hatchling default) so the installed import path is just the
-    package directory's basename joined by dots — `agentix_primitive_bash`.
+    e.g. `src/agentix/primitive/bash`. The wheel layout strips the leading
+    `src/` (hatchling default) so the installed import path is the rest of
+    the segments joined by dots — `agentix.primitive.bash`.
     """
     try:
         packages = pyproject["tool"]["hatch"]["build"]["targets"]["wheel"]["packages"]

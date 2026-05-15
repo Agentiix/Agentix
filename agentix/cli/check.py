@@ -45,7 +45,7 @@ from gen_manifest import generate as _gen_manifest  # noqa: E402
 
 @dataclass
 class Mismatch:
-    closure: str           # closure package, e.g. "agentix_primitive_bash"
+    closure: str           # closure package, e.g. "agentix.primitive.bash"
     method: str            # bound method name
     field: str             # what differs: "param.<name>", "return", "kind"
     stub: str              # stub-side rendering
@@ -63,15 +63,20 @@ def _iter_closure_dirs(roots: Iterable[Path]) -> Iterator[Path]:
     """Yield closure directories under each root.
 
     A closure directory has a `pyproject.toml` and a Python package
-    that exposes a `Namespace` subclass — by convention either
-    `src/<pkg>/__init__.py` (uv init --lib form) or `<pkg>/__init__.py`
-    at the closure root.
+    exposing a `Namespace` subclass. We accept the shapes a normal
+    Python project takes:
+
+      * `src/agentix/<kind>/<short>/__init__.py` — the canonical layout
+        (closure contributes to the `agentix.<kind>` namespace).
+      * `src/<pkg>/__init__.py` — uv init --lib non-namespace form.
+      * `<pkg>/__init__.py` at the closure root — non-src layout.
     """
     def _has_closure(d: Path) -> bool:
         if not (d / "pyproject.toml").is_file():
             return False
         return (
-            any(d.glob("src/*/__init__.py"))
+            any(d.glob("src/agentix/*/*/__init__.py"))
+            or any(d.glob("src/*/__init__.py"))
             or any(d.glob("*/__init__.py"))
         )
 
@@ -101,10 +106,18 @@ def _load_dispatcher(closure_dir: Path, manifest: ClosureManifest):
     """Make the closure importable, then build its dispatcher.
 
     The closure's Python package lives at one of a few conventional
-    spots — the source tree's `src/<pkg>/` (uv init --lib), a flat
-    `<pkg>/` at the closure root, or the deployed image's
-    `entry/python/<pkg>/`. We try each; the first that contains the
-    declared package wins and goes on `sys.path`.
+    spots — `<closure_dir>/src/...` (uv init --lib), `<closure_dir>/...`
+    (flat), or `<closure_dir>/entry/python/...` (deployed image). We
+    try each; the first that contains the declared package wins and
+    goes on `sys.path`.
+
+    For closures that contribute to the `agentix.*` namespace
+    (e.g. `agentix.primitive.bash`), we also re-extend
+    `agentix.__path__` so Python's import machinery picks up the new
+    namespace contribution under the framework's regular `agentix`
+    package. Without this, the framework's `agentix.__path__` is
+    frozen at module-load time and would miss the closure's
+    `agentix/primitive/` subtree.
 
     Once the package is importable, `_import_and_register` handles
     explicit `_register.py` and convention-based auto-discovery.
@@ -123,6 +136,11 @@ def _load_dispatcher(closure_dir: Path, manifest: ClosureManifest):
     py_str = str(py_root)
     if py_str not in sys.path:
         sys.path.insert(0, py_str)
+    if manifest.package.startswith("agentix."):
+        import pkgutil
+
+        import agentix
+        agentix.__path__ = pkgutil.extend_path(list(agentix.__path__), agentix.__name__)
     return _import_and_register(manifest)
 
 

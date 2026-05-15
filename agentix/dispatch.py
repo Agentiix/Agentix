@@ -487,9 +487,8 @@ class Registry:
     boot cheap and isolates per-closure import failures so they surface
     on call rather than blocking startup.
 
-    The closure's Python import path (whatever its `pyproject.toml` ships,
-    e.g. 'agentix_agent_claude_code') is the routing key — there are no
-    caller-chosen namespaces.
+    The closure's Python import path (e.g. 'agentix.agent.claude_code')
+    is the routing key — there are no caller-chosen namespaces.
     """
 
     def __init__(self) -> None:

@@ -7,7 +7,7 @@ inside the sandbox. The framework composes stub + impl automatically.
 Usage:
 
     from agentix import RuntimeClient
-    from agentix_primitive_bash import Bash, BashStdout, BashStderr, BashExit, BashError
+    from agentix.primitive.bash import Bash, BashStdout, BashStderr, BashExit, BashError
 
     async with RuntimeClient(sandbox.runtime_url) as c:
         r = await c.remote(Bash.run, command="ls -la", cwd="/workspace")

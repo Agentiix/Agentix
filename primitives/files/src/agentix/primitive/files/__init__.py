@@ -7,7 +7,7 @@ composes stub + impl automatically.
 Usage:
 
     from agentix import RuntimeClient
-    from agentix_primitive_files import Files
+    from agentix.primitive.files import Files
 
     async with RuntimeClient(sandbox.runtime_url) as c:
         r = await c.remote(Files.upload, path="/workspace/input.txt", content=b"hello")

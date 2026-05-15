@@ -33,29 +33,36 @@ Every closure image satisfies exactly:
 - `VOLUME /nix` — required by the docker deployment's volume-init-from-image populate step
 - `/nix/store/<hash>-*/` — content-addressed Nix deps (native binaries, libs, the closure's Python package wheel content)
 - `/nix/entry/python/<package-tree>/` — the closure's Python package. The runtime adds this to `sys.path` and imports the package named in the manifest.
-- `/nix/entry/manifest.json` — `ClosureManifest` JSON with `abi == AGENTIX_CLOSURE_ABI` and `package` set to the closure's Python import path (whatever the closure's `pyproject.toml` ships, e.g. `agentix_primitive_bash`). **Generated at build time** from `pyproject.toml` by `tools/gen_manifest.py`; closure authors don't write this file.
+- `/nix/entry/manifest.json` — `ClosureManifest` JSON with `abi == AGENTIX_CLOSURE_ABI` and `package` set to the closure's Python import path (e.g. `agentix.primitive.bash`). **Generated at build time** from `pyproject.toml` by `tools/gen_manifest.py`; closure authors don't write this file.
 - Optional: `/nix/entry/bin/...` — native binaries the closure's impl shells out to (claude, git, …). `/exec paths_from=[<package>]` exposes them on PATH.
 
 ### Closure source layout
 
-A closure is a **normal Python project** (the shape `uv init --lib` produces). No framework-specific directory naming, no hidden conventions beyond what hatchling already knows:
+A closure is a **normal Python project** (the shape `uv init --lib` produces) that contributes to the `agentix.*` namespace. Closures install under one of three reserved kind-roots:
+
+* `agentix.primitive.*` — primitives shipped by this repo (`primitives/`)
+* `agentix.agent.*` — agent closures (downstream `Agentix-Agents-Hub`)
+* `agentix.dataset.*` — dataset / task closures (downstream `Agentix-Datasets`)
 
 ```
-primitives/<name>/
-├── pyproject.toml                # all metadata: name, version, description
-└── src/<package_name>/           # whatever you named your Python package
-    ├── __init__.py               # stub class: `class Foo(Namespace)`
-    └── _impl.py                  # impl class: `class FooImpl`
+primitives/bash/
+├── pyproject.toml                          # name = "agentix-primitive-bash"
+└── src/agentix/primitive/bash/             # NB: no __init__.py at src/agentix/ or src/agentix/primitive/
+    ├── __init__.py                         # stub class: `class Bash(Namespace)`
+    └── _impl.py                            # impl class: `class BashImpl`
 ```
 
-- **`pyproject.toml`** is the single source of truth. `[project] name` is the distribution name (PyPI-style: `agentix-primitive-bash`); `version` and `description` flow into the manifest. `[tool.hatch.build.targets.wheel] packages` points at the Python package — usually `src/<package_name>`.
-- **The Python package** can be named anything. The runtime keys on whatever import path `pyproject.toml` ships. By convention, framework-published closures use the distribution-name-with-dashes-as-underscores form (`agentix_primitive_bash`), but a user closure can be `my_cool_agent` — the framework discovers it via `pyproject.toml`.
+The framework's `agentix/__init__.py` extends its `__path__` via `pkgutil.extend_path`, so once a closure dist installs files at `<site-packages>/agentix/primitive/bash/`, `from agentix.primitive.bash import Bash` resolves. The intermediate `agentix/primitive/` (no `__init__.py`) is a PEP 420 namespace subpackage — multiple closure dists can contribute peer entries without colliding.
+
+Reserved by the framework — closure authors must not use these names: `agentix.cli`, `agentix.deployment`, `agentix.dispatch`, `agentix.idents`, `agentix.models`, `agentix.namespace`, `agentix.rollout`, `agentix.runtime`, `agentix.trace`, `agentix.wire`. Everything else under `agentix.<kind>.<short>` is fair game.
+
+- **`pyproject.toml`** is the single source of metadata truth. `[project] name` is the distribution name (e.g. `agentix-primitive-bash`); `version` and `description` flow into the generated manifest. `[tool.hatch.build.targets.wheel] packages = ["src/agentix/<kind>/<short>"]` points hatchling at the package.
 - **`__init__.py`** is what callers import. Stub methods have `...` bodies — the signature is the contract; the body never runs caller-side.
-- **`_impl.py`** has the real bodies on an independent class. Composition over inheritance: `FooImpl` does NOT subclass `Foo`.
+- **`_impl.py`** has the real bodies on an independent class. Composition over inheritance: `BashImpl` does NOT subclass `Bash`.
 
 Optional escape hatches:
 
-- **`_register.py`** — imperative binding for closures that have multiple namespaces or need custom wiring. Rare.
+- **`_register.py`** — imperative binding for closures with multiple namespaces or custom wiring. Rare.
 - **`manifest.json`** — ship a pre-built manifest only when the closure intentionally diverges from what `pyproject.toml` would produce.
 
 `pip install ./primitives/bash` works as-is. `pytest`, `pyright`, `ruff`, `uv build` — every standard Python tool works against the closure's source dir without further configuration. Agentix doesn't impose layout above what hatchling already needs.
@@ -138,7 +145,7 @@ Two transports, used per call shape:
 
 ```
 POST /_remote
-  { "package": "agentix_agent_claude_code",
+  { "package": "agentix.agent.claude_code",
     "method":  "run",
     "args":    [],
     "kwargs":  { "instruction": "fix the bug" } }
@@ -174,7 +181,7 @@ Runtime built-ins (`/exec`, `/upload`, `/download`, `/health`, `/closures`) live
 
 ```python
 from agentix import RuntimeClient
-from agentix_agent_claude_code import ClaudeCode
+from agentix.agent.claude_code import ClaudeCode
 
 async with RuntimeClient(sandbox.runtime_url) as c:
     result = await c.remote(

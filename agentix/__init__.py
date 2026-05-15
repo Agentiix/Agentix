@@ -1,4 +1,19 @@
-"""agentix — a Nix-closure runtime for Docker sandboxes."""
+"""agentix — a Nix-closure runtime for Docker sandboxes.
+
+`agentix` is a namespace-extensible regular package. The framework
+ships its own subpackages (`agentix.cli`, `agentix.dispatch`,
+`agentix.runtime`, …); closures contribute additional subpackages
+under reserved kind-roots: `agentix.primitive.<short>`,
+`agentix.agent.<short>`, `agentix.dataset.<short>`. The
+`pkgutil.extend_path` call below makes `agentix.__path__` aggregate
+every `agentix/` directory on `sys.path`, so a closure dist
+installing files at `<site-packages>/agentix/primitive/bash/`
+becomes importable as `from agentix.primitive.bash import Bash`.
+"""
+
+import pkgutil
+
+__path__ = pkgutil.extend_path(__path__, __name__)
 
 # `trace` is imported eagerly so closure impls can `from agentix import trace`
 # without circular-import gymnastics. It has no runtime deps and registers an

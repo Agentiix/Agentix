@@ -40,7 +40,7 @@ class ClosureManifest(BaseModel):
     package: PackageName = Field(
         description=(
             "Python import path of the closure package, whatever its "
-            "pyproject.toml ships (e.g. 'agentix_primitive_bash')."
+            "pyproject.toml ships (e.g. 'agentix.primitive.bash')."
         ),
     )
     description: str | None = None
@@ -118,21 +118,22 @@ class SandboxConfig(BaseModel):
 def _derive_image_from_module(item: Any) -> str | None:
     """Best-effort: a closure's Python module → its docker image ref.
 
-    Convention: the distribution name is the module's import name with
-    underscores replaced by dashes (the standard PEP 503 normalisation
-    direction). For `agentix-…` dists the docker tag mirrors the dist
-    name in the `agentix/<rest>:<version>` form. Non-`agentix-` dists
-    fall through to a plain `<dist>:<version>` tag.
+    Convention: the distribution name is the module's import path with
+    `.` → `-` and `_` → `-`. E.g. `agentix.primitive.bash` →
+    `agentix-primitive-bash`. For `agentix-` dists the docker tag mirrors
+    the dist name in the `agentix/<rest>:<version>` form (e.g.
+    `agentix/primitive-bash:0.1.0`). Non-`agentix-` dists fall through
+    to a plain `<dist>:<version>` tag.
 
-    Returns None when no installed distribution matches the module
-    name — the caller surfaces a clear error in that case.
+    Returns None when no installed distribution matches — the caller
+    surfaces a clear error in that case.
     """
     if not isinstance(item, types.ModuleType):
         return None
     mod_name = getattr(item, "__name__", "")
     if not mod_name:
         return None
-    dist = mod_name.replace("_", "-")
+    dist = mod_name.replace(".", "-").replace("_", "-")
     try:
         version = importlib.metadata.version(dist)
     except importlib.metadata.PackageNotFoundError:
