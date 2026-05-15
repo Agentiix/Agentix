@@ -1,30 +1,23 @@
 ---
 title: Quick start
-description: Install Agentix, call a namespace from a sandbox, and ship your own — in under five minutes.
+description: Install Agentix, call a namespace inside a sandbox, then write your own — in five minutes.
 ---
 
 # Quick start
 
-!!! abstract "What you'll do"
+Install Agentix, call a namespace inside a sandbox, then write your own — in five minutes.
 
-    1. Install the framework + a couple of bundled namespaces.
-    2. Call `Bash.run` inside a Docker sandbox from your own Python.
-    3. Write — and publish — your first namespace.
+!!! tip
+    Looking for a deeper tour? See the [Plugin authors guide](plugins.md) for
+    every extension axis, or [Architecture](architecture.md) for how the
+    runtime dispatches calls.
 
-    Total time: ~5 minutes. Prerequisites: Python 3.11+, Docker.
+## Prerequisites
 
-```mermaid
-flowchart LR
-    A[your code] -->|c.remote&#40;Bash.run, ...&#41;| B(RuntimeClient)
-    B -->|POST /_remote| C[runtime in sandbox]
-    C -->|dispatch| D[Bash namespace]
-    D -->|stdout| C
-    C --> B --> A
-```
+- Python 3.11 or newer
+- Docker (for the `local` deployment used below)
 
----
-
-## 1. Install
+## Install
 
 === "pip"
 
@@ -38,7 +31,7 @@ flowchart LR
     uv add agentix agentix-bash agentix-files
     ```
 
-=== "from source"
+=== "From source"
 
     ```bash
     git clone https://github.com/Agentiix/Agentix
@@ -46,16 +39,15 @@ flowchart LR
     pip install -e ./primitives/bash -e ./primitives/files
     ```
 
-!!! tip "Why two installs?"
-    `agentix` is the framework. `agentix-bash` / `agentix-files` are
-    **namespaces** — independently versioned wheels that contribute the actual
-    `Bash` / `Files` classes. Every namespace, deployment, or trace sink follows
-    the same pattern: one wheel, one entry-point block.
+`agentix` is the framework; `agentix-bash` and `agentix-files` are
+**namespaces** — independently versioned wheels that contribute the
+remote-callable `Bash` and `Files` classes. Every namespace, deployment, or
+trace sink follows the same pattern: one wheel, one entry-point block.
 
-## 2. Verify
+## Verify the install
 
 ```bash
-$ agentix plugins
+agentix plugins
 ```
 
 ```text
@@ -69,15 +61,12 @@ agentix.deployment
   e2b     → …
 ```
 
-!!! note "Six axes, one mechanism"
-    `agentix plugins` lists every installed extension across **all six axes**
-    (namespaces, deployments, trace sinks, spec resolvers, wire patterns, CLI
-    subcommands). If something installed but doesn't show here, run with
-    `--verbose` to see the load traceback.
+`agentix plugins` lists every installed extension across all six axes —
+namespaces, deployments, trace sinks, spec resolvers, wire patterns, and
+CLI subcommands. Add `--verbose` to see load tracebacks for anything that
+failed to import.
 
----
-
-## 3. Call a namespace from your code
+## Call a namespace
 
 ```python title="hello_sandbox.py"
 import asyncio
@@ -101,32 +90,32 @@ async def main():
 asyncio.run(main())
 ```
 
-1. The **stub** — `pip install agentix-bash` makes this import resolve. It
-    carries types only; the real body runs inside the sandbox.
-2. `DockerDeployment` is the built-in `local` deployment. Look it up
-    dynamically with `load_deployment("local")` for hot-swappable backends.
+1. The typed surface — `pip install agentix-bash` makes this import resolve.
+   Methods carry the real implementation; you call them via `c.remote(...)`,
+   which executes them inside the sandbox.
+2. `DockerDeployment` is the built-in `local` deployment. Swap in another
+   backend with `load_deployment("daytona")` or `load_deployment("e2b")`.
 3. One closure image per namespace, pre-built by `agentix build`.
-4. `session(...)` is a free function (not a method) — composition, not
-    inheritance. It creates the sandbox on entry, deletes on exit.
-5. `c.remote` reads `Bash.run.__module__` (= `"agentix.bash"`) as the routing
-    key. Unary calls go over `POST /_remote`; streaming methods auto-upgrade
-    to Socket.IO.
+4. `session(...)` is a free function — composition over inheritance. It
+   creates the sandbox on entry and tears it down on exit.
+5. `c.remote` reads `Bash.run.__module__` (= `"agentix.bash"`) as the
+   routing key. Unary calls go over `POST /_remote`; methods returning
+   `AsyncIterator[T]` auto-upgrade to Socket.IO.
 
-??? example "Run it"
+Run it:
 
-    ```bash
-    $ python hello_sandbox.py
-    hi
-    ```
+```bash
+python hello_sandbox.py
+# → hi
+```
 
-    First run pulls the runtime + namespace images (~30 s). Subsequent
-    sandboxes start in ~100 ms.
+The first run pulls the runtime and namespace images (≈ 30 s). Subsequent
+sandboxes start in about 100 ms.
 
----
+## Write your own namespace
 
-## 4. Write your own namespace
-
-Three files. The project itself is whatever `uv init --lib` produces.
+A namespace is a normal Python project — whatever `uv init --lib` produces —
+plus one entry-point block.
 
 === "Source"
 
@@ -162,62 +151,60 @@ Three files. The project itself is whatever `uv init --lib` produces.
     my-namespace/
     ├── pyproject.toml
     └── src/
-        └── agentix/                  # PEP 420 namespace package (no __init__.py)
+        └── agentix/                  # PEP 420 namespace package, no __init__.py
             └── myagent/
                 └── __init__.py       # class MyAgent(Namespace)
     ```
 
 !!! warning "Composition over inheritance"
-    `MyAgent` is a `Namespace` subclass purely for the discovery hook —
-    methods are `@staticmethod`, no `self`, no instance state. **Do not** add
-    a separate `MyAgentImpl` class that inherits from `MyAgent`; if you split
-    impl from stub, compose them with `Dispatcher.bind_namespace` instead.
+    `MyAgent` subclasses `Namespace` purely for the discovery hook —
+    its methods are `@staticmethod` with no `self` and no instance state.
+    Do **not** create a separate `MyAgentImpl` that inherits from `MyAgent`.
+    If you split an impl from a stub, compose them with
+    `Dispatcher.bind_namespace` instead.
 
 Build, bundle, deploy:
 
 ```bash
 agentix build ./my-namespace                       # → agentix/myagent:0.1.0
-agentix install bash myagent -o my-bundle:0.1.0    # bundle multiple namespaces
+agentix install bash myagent -o my-bundle:0.1.0    # bundle several namespaces
 agentix deploy local --image my-bundle:0.1.0       # run a sandbox
 ```
 
-!!! success "Shipping it"
-    `pip install agentix-myagent` is all your users need to do. The framework
-    discovers the entry point, and `from agentix.myagent import MyAgent`
-    resolves natively in their code.
-
----
+`pip install agentix-myagent` is everything your users need. The framework
+discovers the entry point, and `from agentix.myagent import MyAgent`
+resolves natively in their code.
 
 ## Next
 
 <div class="grid cards" markdown>
 
--   :material-puzzle:{ .lg .middle } **[Plugin authors guide](plugins.md)**
+-   **[Plugin authors guide](plugins.md)**
 
     ---
 
     Deployments, trace sinks, spec resolvers, wire patterns, CLI subcommands —
     all six axes share this same entry-point pattern.
 
--   :material-sitemap:{ .lg .middle } **[Architecture](architecture.md)**
+-   **[Architecture](architecture.md)**
 
     ---
 
     How the dispatcher, runtime, and wire patterns fit together inside the
     sandbox.
 
--   :material-console:{ .lg .middle } **[CLI reference](cli.md)**
+-   **[CLI reference](cli.md)**
 
     ---
 
-    Every `agentix <subcommand>` documented — `build`, `install`, `deploy`,
+    Every `agentix <subcommand>` documented: `build`, `install`, `deploy`,
     `check`, `plugins`.
 
--   :material-protocol:{ .lg .middle } **[Namespace protocol](namespace-protocol.md)**
+-   **[Namespace protocol](namespace-protocol.md)**
 
     ---
 
-    The wire-format contract between caller and sandbox. Useful if you're
+    The wire-format contract between caller and sandbox — useful when
     porting the client to another language.
 
 </div>
