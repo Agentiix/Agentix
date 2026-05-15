@@ -2,8 +2,10 @@
 
 A small argparse-based dispatcher for the developer-facing tools:
 
-    agentix build  primitives/bash               # build a closure image
-    agentix check  primitives/                   # stub ↔ impl signature drift
+    agentix build   primitives/bash              # build one closure image
+    agentix install bash files -o my-agent:0.1.0 # bundle several closures
+    agentix deploy  local --image my-agent:0.1.0 # run a sandbox
+    agentix check   primitives/                  # stub ↔ impl signature drift
 
 Subcommands live in sibling modules so they can also be invoked
 directly (`python -m agentix.cli.build …`). The CLI is intentionally
@@ -16,40 +18,61 @@ the `agentix` package available. Keep it standalone.
 
 from __future__ import annotations
 
-import argparse
 import sys
 from collections.abc import Sequence
 
+# Subcommand registry. Each entry pairs the user-typed name with a
+# lazy resolver returning the subcommand's `main(argv)` callable. The
+# resolver imports on demand so `agentix --help` doesn't pay for docker
+# / pydantic schema generation it isn't going to use.
+_COMMANDS: dict[str, tuple[str, callable]] = {
+    "build":   ("build a single closure image",
+                lambda: _import("agentix.cli.build").main),
+    "install": ("bundle multiple closures into one image",
+                lambda: _import("agentix.cli.install").main),
+    "deploy":  ("deploy a bundle to a deployment backend",
+                lambda: _import("agentix.cli.deploy").main),
+    "check":   ("stub ↔ impl signature drift",
+                lambda: _import("agentix.cli.check").main),
+}
+
+
+def _import(name: str):
+    import importlib
+    return importlib.import_module(name)
+
+
+def _print_root_help() -> None:
+    print("usage: agentix <command> [args...]\n")
+    print("Agentix developer CLI\n")
+    print("commands:")
+    width = max(len(c) for c in _COMMANDS) + 2
+    for cmd, (desc, _resolve) in _COMMANDS.items():
+        print(f"  {cmd.ljust(width)}{desc}")
+    print("\nRun `agentix <command> --help` for command-specific options.")
+
 
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        prog="agentix",
-        description="Agentix developer CLI",
-    )
-    subparsers = parser.add_subparsers(dest="command", required=True)
+    """Dispatch to one of the subcommand `main(argv)` functions.
 
-    # Lazy import — keeps `agentix --help` fast and avoids pulling docker /
-    # nix / pydantic schema generation into every CLI invocation.
-    build_p = subparsers.add_parser("build", help="build a closure image")
-    build_p.set_defaults(_run=lambda args, rest: _run_build(rest))
-
-    check_p = subparsers.add_parser("check", help="stub ↔ impl signature drift")
-    check_p.set_defaults(_run=lambda args, rest: _run_check(rest))
-
-    # `parse_known_args` lets each subcommand define its own flags without
-    # forcing every option to be declared up front in the root parser.
-    args, rest = parser.parse_known_args(argv)
-    return args._run(args, rest)
-
-
-def _run_build(rest: list[str]) -> int:
-    from agentix.cli.build import main as build_main
-    return build_main(rest)
-
-
-def _run_check(rest: list[str]) -> int:
-    from agentix.cli.check import main as check_main
-    return check_main(rest)
+    We deliberately *don't* use a single argparse subparser. argparse's
+    `--help` is greedy: with subparsers, `agentix install --help` would
+    be intercepted at the root level and never reach the install
+    parser. Manual dispatch keeps each subcommand's `--help` intact.
+    """
+    if argv is None:
+        argv = sys.argv[1:]
+    if not argv or argv[0] in ("-h", "--help"):
+        _print_root_help()
+        return 0
+    cmd, *rest = argv
+    entry = _COMMANDS.get(cmd)
+    if entry is None:
+        print(f"unknown command: {cmd!r}\n", file=sys.stderr)
+        _print_root_help()
+        return 2
+    _desc, resolve = entry
+    return resolve()(rest)
 
 
 if __name__ == "__main__":

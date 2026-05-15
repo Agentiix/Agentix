@@ -70,12 +70,25 @@ The runtime imports each closure lazily on first call. No global mutable state i
 Developer commands ship as the `agentix` console script (`pip install -e .[dev]` registers it):
 
 ```
-agentix build primitives/bash               # build the closure image
-agentix build primitives/bash --dry-run     # stage the build context to ./build/<name>/ for inspection
-agentix check primitives/                   # stub ↔ impl signature drift across all closures under primitives/
+agentix build primitives/bash                          # build one closure image
+agentix install bash files claude-code -o my-agent:0.1.0  # bundle several closures
+agentix deploy local --image my-agent:0.1.0            # run a sandbox
+agentix check primitives/                              # stub ↔ impl signature drift
 ```
 
-`agentix build` stages a self-contained docker build context (closure source + shared Dockerfile/nix/gen_manifest) into a temp dir, then runs `docker build`. The closure dir never carries Dockerfile/default.nix/manifest.json itself.
+Each command is a thin module under `agentix/cli/`; `agentix --help` lists them. Every subcommand has `--dry-run` where staging dominates.
+
+**`agentix build <dir>`** — builds a single closure. Stages closure source + shared Dockerfile/nix/gen_manifest into a temp dir, runs `docker build`.
+
+**`agentix install <names> -o <tag>`** — bundles multiple closures into one image. Each spec resolves in order: existing local path, then conventional `primitives/<n>` / `agents/<n>` / `datasets/<n>` in the repo, then PyPI as `agentix-<kind>-<n>` (PyPI fetch + extract is stubbed — local resolution works today), then a `host/name:tag` image ref (also stubbed). The bundle image carries `/nix/entry/bundle.json` so the runtime's `_auto_load` registers every nested closure on boot.
+
+**`agentix deploy <backend>`** — provisions a sandbox.
+* `local` — wired through `DockerDeployment`.
+* `daytona`, `e2b` — CLI surface only; both fail with a clear `NotImplementedError` until their managed-sandbox integrations land.
+
+Foreground by default: prints `runtime_url`, holds the sandbox alive until Ctrl-C, then deletes. `--detach` exits after `create()` and just prints the sandbox handle.
+
+**`agentix check [roots...]`** — stub ↔ impl signature drift across closures, including bundled ones.
 
 ### Sandbox layout at runtime
 
