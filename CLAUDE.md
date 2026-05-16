@@ -26,7 +26,7 @@ Downstream repos (`Agentix-Agents-Hub`, `Agentix-Datasets`) are updated in locks
 
 The substrate is a single Python runtime process inside a sandbox container, into which **namespace dists install their Python packages**. The runtime walks `importlib.metadata.entry_points(group="agentix.namespace")` at start-up to discover them and dispatches `c.remote(Bash.run, ...)` calls in-process. No subprocess per namespace, no UDS, no reverse-proxy, no manifest files.
 
-The word *namespace* here means the framework-recognized unit of extension on the dispatch axis: a Python class whose `@staticmethod` methods are the remote-callable surface. (Other extension axes — deployments, trace sinks, etc. — are documented in `docs/plugins.md`.)
+The word *namespace* here means the framework-recognized unit of extension on the dispatch axis: a Python class whose `@staticmethod` methods are the remote-callable surface. (Other extension axes — deployments, trace sinks, etc. — are documented in `docs/plugin-authors.mdx`.)
 
 ### The extension contract
 
@@ -83,7 +83,7 @@ The runtime loads each namespace lazily — the entry-point object is captured a
 
 ### Extension axes beyond namespaces
 
-The framework has six plugin axes total, every one of them entry-point discovered (see `docs/plugins.md` for the full reference):
+The framework has six plugin axes total, every one of them entry-point discovered (see `docs/plugin-authors.mdx` for the full reference):
 
 | Axis | Group | Semantics |
 |---|---|---|

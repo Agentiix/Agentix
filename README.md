@@ -120,7 +120,7 @@ my-thing = "module:Thing"
 
 > The quotes around the group name are TOML syntax — `agentix.deployment` contains a dot, and TOML treats dots in `[a.b.c]` as table-key separators. Quoting forces it to be a single key. Every framework with a dotted group name does this (`flask.commands`, `mkdocs.plugins`, `sphinx.builders`, …).
 
-See [`docs/plugins.md`](docs/plugins.md) for the full plugin authors guide — one section per axis with working examples.
+See [`docs/plugin-authors.mdx`](docs/plugin-authors.mdx) for the full plugin authors guide — one section per axis with working examples. Rendered site: [agentiix.github.io](https://agentiix.github.io/).
 
 ## Architecture
 
@@ -138,7 +138,7 @@ Orchestrator ──HTTP /_remote──► Runtime Server ──in-process call�
 | WirePattern | Pluggable call-shape strategy — built-ins are unary / stream / bidi |
 | Trace sink | Optional observability hook — receives every `trace.emit(...)` event |
 
-Discovery is lazy: namespace `ep.load()` is deferred until the first `/_remote` call for that namespace; one broken namespace doesn't block sandbox boot. See [`docs/architecture.md`](docs/architecture.md) and [`docs/namespace-protocol.md`](docs/namespace-protocol.md) for protocol details.
+Discovery is lazy: namespace `ep.load()` is deferred until the first `/_remote` call for that namespace; one broken namespace doesn't block sandbox boot. See [`docs/reference/architecture.mdx`](docs/reference/architecture.mdx) and [`docs/reference/namespace-protocol.mdx`](docs/reference/namespace-protocol.mdx) for protocol details.
 
 ## Roadmap
 
@@ -146,7 +146,7 @@ See [ROADMAP.md](ROADMAP.md).
 
 ## Contributing
 
-See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md). Project conventions in [CLAUDE.md](CLAUDE.md) — read the "组合优于继承 / Composition over inheritance" section.
+See [docs/development.mdx](docs/development.mdx). Project conventions in [CLAUDE.md](CLAUDE.md) — read the "组合优于继承 / Composition over inheritance" section. Docs site is built with Mintlify; see [`docs/DEPLOY.md`](docs/DEPLOY.md) for the one-time GitHub Pages setup.
 
 ## License
 

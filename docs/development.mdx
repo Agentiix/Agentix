@@ -1,9 +1,14 @@
-# Development Guide
+---
+title: Development
+description: Local setup, daily workflow, and how to add a new closure.
+---
 
 ## Prerequisites
 
 - Python 3.11+
-- [Docker](https://docs.docker.com/get-docker/) — the only host requirement. Nix runs inside the builder stage of `tests/closure-docker/Dockerfile`.
+- [Docker](https://docs.docker.com/get-docker/) — the only host
+  requirement. Nix runs inside the builder stage of
+  `tests/closure-docker/Dockerfile`.
 
 ## Setup
 
@@ -13,7 +18,7 @@ cd Agentix
 pip install -e '.[dev]'        # fastapi, uvicorn, httpx, pytest, ruff
 ```
 
-## Daily Workflow
+## Daily workflow
 
 ### Run the runtime server locally (no sandbox)
 
@@ -22,7 +27,9 @@ agentix-server                 # http://localhost:8000
 agentix-server --port 9000
 ```
 
-Without any closures mounted, the server exposes its built-ins (`/health`, `/exec`, `/upload`, `/download`). Useful for iterating on the runtime without the Docker round-trip.
+Without any closures mounted, the server exposes its built-ins
+(`/health`, `/exec`, `/upload`, `/download`). Useful for iterating on
+the runtime without the Docker round-trip.
 
 ### Build closures
 
@@ -67,7 +74,8 @@ pytest -x                   # stop on first failure
 
 ## Adding a new closure
 
-Everything inside the sandbox is a closure. Copy a reference and write your own Dockerfile:
+Everything inside the sandbox is a closure. Copy a reference and write
+your own Dockerfile:
 
 ```bash
 cp -r tests/closures/mock-agent my-closure
@@ -86,4 +94,5 @@ SandboxConfig(
 )
 ```
 
-See `docs/closure-protocol.md` for the closure ABI.
+See [Namespace protocol](/reference/namespace-protocol) for the closure
+ABI.

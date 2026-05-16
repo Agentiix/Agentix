@@ -1,0 +1,48 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "theme": "mint",
+  "name": "Agentix",
+  "description": "Typed Python namespaces for sandbox-based agent workflows.",
+  "colors": {
+    "primary": "#cc785c",
+    "light": "#e08a6d",
+    "dark": "#a45a45"
+  },
+  "navigation": {
+    "groups": [
+      {
+        "group": "Getting started",
+        "pages": ["index", "quickstart"]
+      },
+      {
+        "group": "Guides",
+        "pages": ["axes", "plugin-authors"]
+      },
+      {
+        "group": "Reference",
+        "pages": [
+          "reference/architecture",
+          "reference/namespace-protocol",
+          "reference/cli"
+        ]
+      },
+      {
+        "group": "Development",
+        "pages": ["development"]
+      }
+    ]
+  },
+  "navbar": {
+    "links": [
+      {
+        "label": "GitHub",
+        "href": "https://github.com/Agentiix/Agentix"
+      }
+    ]
+  },
+  "footer": {
+    "socials": {
+      "github": "https://github.com/Agentiix/Agentix"
+    }
+  }
+}
