@@ -88,11 +88,13 @@ bundle image:
    built; the full closure is copied to `/export/nix/store`. Bundles
    with no system deps anywhere skip this stage entirely.
 2. **Stage 2 (per-namespace venvs):** `FROM agentix/runtime:<version>`
-   (which is Python 3.11-slim + framework venv at `/venvs/runtime/` +
-   uv + the framework wheel stashed at `/agentix-wheel/`). If stage 1
-   ran, `COPY --from=sys-builder /export/nix /nix`. Then **for each
-   spec** create its own venv via `uv venv /venvs/<short>/` and
-   pip-install the namespace + the framework wheel into it.
+   (which is Python 3.11-slim + framework venv at `/nix/runtime/` +
+   uv + the framework wheel stashed at `/nix/.wheels/`). If stage 1
+   ran, `COPY --from=sys-builder /export/nix/store /nix/store`. Then
+   **for each spec** create its own venv via `uv venv /nix/<short>/`
+   and pip-install the namespace + the framework wheel into it. For
+   specs with `default.nix`, also symlink the derivation's `bin/*`
+   into `/nix/<short>/bin/`.
 3. **Output:** one image carrying the framework + one venv per
    namespace + any system deps. The sandbox runs it directly.
 
@@ -120,10 +122,10 @@ The runtime image (`agentix/runtime:<version>`) is built once via
         └── <hash>-git-*/bin/git
 ```
 
-The sandbox container's `ENTRYPOINT` is `/venvs/runtime/bin/agentix-server`.
+The sandbox container's `ENTRYPOINT` is `/nix/runtime/bin/agentix-server`.
 It binds to `AGENTIX_BIND_PORT` and starts the multiplexer; namespace
 workers spawn lazily on first dispatch using each namespace's
-`/venvs/<short>/bin/python`.
+`/nix/<short>/bin/python`.
 
 ## Environment & PATH policy
 
@@ -165,7 +167,7 @@ carries everything.
   forwards RPC frames over stdin/stdout, and routes trace events back
   to the Socket.IO channel.
 - **Entry-point discovery across venvs** — the multiplexer walks
-  `/venvs/*/lib/python*/site-packages` for `agentix.namespace` entry
+  `/nix/<short>/lib/python*/site-packages` for `agentix.namespace` entry
   points. No `manifest.json`, no per-framework decorator.
 - **The class is the API spec** — `@staticmethod` methods on a
   `Namespace` subclass carry both the type signature and the real

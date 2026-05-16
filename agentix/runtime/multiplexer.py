@@ -36,6 +36,7 @@ from __future__ import annotations
 import asyncio
 import importlib.metadata
 import logging
+import os
 import sys
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
@@ -72,8 +73,9 @@ class _NamespaceEntry:
     dist_version: str
 
     # Subprocess fields
-    target: str | None = None         # "module:Class"
+    target: str | None = None         # "module" or "module:attr"
     python: str | None = None         # path to interpreter for this venv
+    bin_dir: Path | None = None       # /nix/<short>/bin — prepended to worker PATH
 
     # In-process fields (tests)
     dispatcher: Dispatcher | None = None
@@ -135,11 +137,16 @@ class _SubprocessWorker:
         target: str,
         python: str,
         trace_forwarder: TraceForwarder | None,
+        ns_bin_dir: Path | None = None,
     ) -> None:
         self._package = package
         self._target = target
         self._python = python
         self._trace_forwarder = trace_forwarder
+        # If provided, prepended to the worker's PATH so user code can call
+        # Nix-provided binaries (`git`, `claude`, …) by bare name without
+        # knowing the absolute /nix/<short>/bin path.
+        self._ns_bin_dir = ns_bin_dir
 
         self._proc: asyncio.subprocess.Process | None = None
         self._send_lock = asyncio.Lock()
@@ -156,11 +163,18 @@ class _SubprocessWorker:
         # unavailable to us — the multiplexer just forwards frames.
 
     async def start(self) -> None:
+        env = dict(os.environ)
+        if self._ns_bin_dir is not None:
+            # Prepend the namespace's bin dir so subprocess.run("git", …)
+            # in user code resolves to /nix/<short>/bin/git transparently.
+            existing = env.get("PATH", "/usr/local/bin:/usr/bin:/bin")
+            env["PATH"] = f"{self._ns_bin_dir}:{existing}"
         self._proc = await asyncio.create_subprocess_exec(
             self._python, "-m", "agentix.runtime.worker", "--target", self._target,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=sys.stderr,  # logs straight through to runtime stderr
+            env=env,
         )
         self._read_task = asyncio.create_task(self._read_loop())
         await self._ready.wait()
@@ -356,25 +370,31 @@ class NamespaceMultiplexer:
         """Discover namespace entry points.
 
         In bundle images (produced by `agentix build`), every namespace
-        lives in its own `/venvs/<short>/` venv; we walk those for
+        lives in its own `/nix/<short>/` venv; we walk those for
         `agentix.namespace` entry points and record each venv's Python
         interpreter so workers spawn in their own dep world.
 
-        In dev / test (no `/venvs/` dir), fall back to walking the current
+        In dev / test (no bundle layout), fall back to walking the current
         Python's installed entry points — every namespace pip-installed
         in the same env is reachable via `sys.executable`.
 
         Tests using `register_inprocess()` skip this entirely.
         """
-        venvs_root = Path("/venvs")
-        if venvs_root.is_dir():
-            self._discover_from_venvs(venvs_root)
+        nix_root = Path("/nix")
+        if (nix_root / "runtime").is_dir():
+            # Bundle layout: /nix/runtime + /nix/<short>/ siblings.
+            self._discover_from_nix(nix_root)
         else:
             self._discover_from_current_env()
 
-    def _discover_from_venvs(self, venvs_root: Path) -> None:
-        for venv in sorted(venvs_root.iterdir()):
-            if not venv.is_dir() or venv.name == "runtime":
+    # Names under /nix/ that are NOT namespace venvs.
+    _NIX_NON_NAMESPACE = frozenset({"runtime", "store"})
+
+    def _discover_from_nix(self, nix_root: Path) -> None:
+        for venv in sorted(nix_root.iterdir()):
+            if not venv.is_dir():
+                continue
+            if venv.name in self._NIX_NON_NAMESPACE or venv.name.startswith("."):
                 continue
             python = venv / "bin" / "python"
             if not python.exists():
@@ -383,6 +403,7 @@ class NamespaceMultiplexer:
             if not site_pkgs_candidates:
                 continue
             site_pkgs = site_pkgs_candidates[0]
+            bin_dir = venv / "bin"
             for dist in importlib.metadata.distributions(path=[str(site_pkgs)]):
                 for ep in dist.entry_points:
                     if ep.group != NAMESPACE_ENTRY_POINT_GROUP:
@@ -395,6 +416,7 @@ class NamespaceMultiplexer:
                         dist_name=dist.metadata["Name"] or "",
                         dist_version=dist.version or "",
                         target=ep.value, python=str(python),
+                        bin_dir=bin_dir,
                     )
 
     def _discover_from_current_env(self) -> None:
@@ -457,6 +479,7 @@ class NamespaceMultiplexer:
                 assert entry.target is not None and entry.python is not None
                 w = _SubprocessWorker(
                     package, entry.target, entry.python, self._trace_forwarder,
+                    ns_bin_dir=entry.bin_dir,
                 )
                 await w.start()
                 entry.worker = w
