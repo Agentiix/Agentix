@@ -12,14 +12,13 @@ from collections.abc import AsyncIterator
 from pydantic import BaseModel
 
 from agentix import trace
-from agentix.namespace import Namespace
 
 
 class EchoResult(BaseModel):
     msg: str
 
 
-class Echo(Namespace):
+class Echo:
     @staticmethod
     async def echo(msg: str) -> EchoResult:
         return EchoResult(msg=f"echo:{msg}")

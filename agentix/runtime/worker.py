@@ -1,9 +1,11 @@
-"""Namespace worker — `python -m agentix.runtime.worker --target module:Class`.
+"""Namespace worker — `python -m agentix.runtime.worker --target <pkg>`.
 
 A worker is a single-namespace dispatch process that the runtime
-multiplexer spawns lazily on first call. It loads ONE namespace class,
-binds it via `Dispatcher`, and serves dispatch over stdin/stdout using
-the RPC frame protocol in `agentix.runtime.rpc`.
+multiplexer spawns lazily on first call. It loads ONE namespace target
+(typically a Python package, but a `module:attr` form is also accepted
+for class-style or partial targets), binds it via `Dispatcher`, and
+serves dispatch over stdin/stdout using the RPC frame protocol in
+`agentix.runtime.rpc`.
 
 The worker holds:
 
@@ -11,9 +13,9 @@ The worker holds:
   - one asyncio task per in-flight call, keyed by `call_id`
   - one input queue per in-flight bidi call (for `bidi_in` chunks)
 
-It forwards trace events via a sink that wraps each `trace.emit()` into
-a frame on stdout. Logs go through Python's logging to stderr, which
-the multiplexer captures separately.
+It forwards trace events via a subscriber that wraps each
+`trace.emit()` into a frame on stdout. Logs go through Python's
+logging to stderr, which the multiplexer captures separately.
 """
 
 from __future__ import annotations
@@ -21,6 +23,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import importlib
+import inspect
 import logging
 import sys
 import traceback
@@ -34,13 +37,21 @@ from agentix.runtime.rpc import read_frame, write_frame
 logger = logging.getLogger("agentix.runtime.worker")
 
 
-def _load_class(target: str) -> type:
-    """`module:Class` → class object. Same shape as setuptools entry points."""
-    if ":" not in target:
-        raise ValueError(f"--target must be 'module:Class', got {target!r}")
-    mod_name, cls_name = target.split(":", 1)
-    mod = importlib.import_module(mod_name)
-    return getattr(mod, cls_name)
+def _load_target(target: str) -> Any:
+    """Resolve `target` to a Python object.
+
+    Two forms (setuptools entry-point grammar):
+      * `module.path`        → the module itself
+      * `module.path:attr`   → `getattr(module, attr)` — a class or any obj
+
+    The dispatcher duck-types whatever comes back; the bare-module form
+    is the recommended namespace shape.
+    """
+    if ":" in target:
+        mod_name, attr_name = target.split(":", 1)
+        mod = importlib.import_module(mod_name)
+        return getattr(mod, attr_name)
+    return importlib.import_module(target)
 
 
 def _err(exc: BaseException) -> dict[str, Any]:
@@ -264,9 +275,13 @@ _END_SENTINEL: Any = object()
 
 
 def _make_dispatcher(target: str) -> tuple[Dispatcher, str]:
-    cls = _load_class(target)
-    dispatcher = Dispatcher().bind_namespace(cls)
-    return dispatcher, cls.__module__
+    obj = _load_target(target)
+    dispatcher = Dispatcher().bind_namespace(obj)
+    # Routing key: the module the target lives in. For a bare-module
+    # target the module IS the object; for `module:attr` we take the
+    # module path so caller-side `fn.__module__` matches.
+    package = obj.__name__ if inspect.ismodule(obj) else obj.__module__
+    return dispatcher, package
 
 
 async def _amain(target: str) -> None:
@@ -293,7 +308,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(prog="agentix.runtime.worker")
     parser.add_argument(
         "--target", required=True,
-        help="namespace class to load, in `module:Class` form",
+        help="namespace to load — `module.path` (recommended, package-as-namespace) "
+             "or `module.path:attr` (class-style or partial target)",
     )
     args = parser.parse_args()
     try:

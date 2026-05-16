@@ -18,7 +18,7 @@ import sys
 from collections.abc import Sequence
 
 from agentix.dispatch import discover_entry_points
-from agentix.namespace import Namespace
+from agentix.namespace import discover_methods
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -37,21 +37,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     failures = 0
     for ep in eps:
         try:
-            cls = ep.load()
+            target = ep.load()
         except Exception as exc:
             print(f"FAIL {ep.value}: {type(exc).__name__}: {exc}", file=sys.stderr)
             failures += 1
             continue
-        if not isinstance(cls, type) or Namespace not in cls.__mro__:
+        methods = list(discover_methods(target))
+        if not methods:
             print(
-                f"FAIL {ep.value}: {cls!r} is not a Namespace subclass",
+                f"FAIL {ep.value}: no async methods discovered on {target!r}",
                 file=sys.stderr,
             )
             failures += 1
             continue
         dist = ep.dist
         dist_str = f"{dist.name}@{dist.version}" if dist else "(unknown dist)"
-        print(f"OK   {ep.name:20s} {ep.value:40s} {dist_str}")
+        print(f"OK   {ep.name:20s} {ep.value:40s} {dist_str} ({len(methods)} method(s))")
 
     if failures:
         print(f"\n{failures} namespace(s) failed to load", file=sys.stderr)

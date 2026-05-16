@@ -1,32 +1,28 @@
 ---
 title: Namespace
-description: A Python class whose @staticmethod methods are remote-callable inside the sandbox.
+description: A Python package whose top-level async functions are remote-callable inside the sandbox.
 ---
 
-A **namespace** is a Python class whose `@staticmethod` methods are
-remote-callable. The class itself is a pure namespace — no instance
-state, no `self`. Callers invoke methods via
-`c.remote(Bash.run, command="ls")`; the runtime reads
-`Bash.run.__module__` as the routing key, imports the class on first
-call, and runs the real method body inside the sandbox.
+A **namespace** is a Python package (`agentix.<short>`) whose top-level
+async functions are remote-callable. Callers invoke them via
+`c.remote(bash.run, command="ls")`; the runtime reads
+`bash.run.__module__` as the routing key, spawns a worker subprocess
+for that package on first call (using the namespace's own venv), and
+runs the real method body inside the sandbox.
 
 ## Writing one
 
 A namespace is a normal Python project (whatever `uv init --lib`
-produces) plus one entry-point block.
+produces) plus one entry-point block pointing at the package.
 
 <Tabs>
   <Tab title="Plugin source">
     ```python title="src/agentix/myagent/__init__.py"
-    from agentix.namespace import Namespace
+    """Optional module docstring — surfaces in /namespaces output."""
 
-    class MyAgent(Namespace):
-        """Optional docstring — surfaces in /namespaces output."""
-
-        @staticmethod
-        async def run(instruction: str) -> str:
-            # real implementation — runs inside the sandbox
-            return f"did: {instruction}"
+    async def run(instruction: str) -> str:
+        # real implementation — runs inside the sandbox
+        return f"did: {instruction}"
     ```
   </Tab>
   <Tab title="pyproject.toml">
@@ -37,7 +33,7 @@ produces) plus one entry-point block.
     requires-python = ">=3.11"
 
     [project.entry-points."agentix.namespace"]
-    myagent = "agentix.myagent:MyAgent"
+    myagent = "agentix.myagent"
 
     [tool.hatch.build.targets.wheel]
     packages = ["src/agentix"]
@@ -50,76 +46,83 @@ produces) plus one entry-point block.
     └── src/
         └── agentix/              # PEP 420 namespace package, no __init__.py
             └── myagent/
-                └── __init__.py   # class MyAgent(Namespace)
+                └── __init__.py   # async def run(...), helper types, …
     ```
   </Tab>
 </Tabs>
+
+The package can contain anything — dataclasses, constants, type
+aliases, sync helpers. The framework's discovery only picks **public
+async functions** (`async def` / `async def ... yield`) as remote
+methods; everything else is regular Python that callers import
+normally.
 
 `primitives/bash` and `primitives/files` are working in-tree examples.
 
 ## Using one
 
 ```python
-from agentix import RuntimeClient
-from agentix.bash import Bash
+from agentix import RuntimeClient, bash
+from agentix.bash import BashResult       # type for return-annotation
 
 async with RuntimeClient(sandbox.runtime_url) as c:
-    result = await c.remote(Bash.run, command="echo hi")
+    result: BashResult = await c.remote(bash.run, command="echo hi")
     print(result.stdout)        # → "hi\n"
 ```
 
 `pip install agentix-bash` is everything the caller needs. The runtime
-discovers the entry point on startup, defers `ep.load()` until the
-first dispatch for the namespace, and caches the loaded class for the
-rest of its life.
+discovers the entry point on startup, defers worker spawn until the
+first dispatch for the namespace, and reuses the same worker for the
+rest of the sandbox's life.
 
-<Warning>
-  **Composition over inheritance.** Methods are `@staticmethod`. Do not
-  create an `<Name>Impl` shadow class that inherits from your namespace
-  — the class itself carries the real bodies. If you ever split impl
-  from stub for tests, compose them with `Dispatcher.bind_namespace`
-  rather than inheriting.
-</Warning>
+<Tip>
+  **Why no base class?** `agentix.namespace.discover_methods` is
+  duck-typed — anything with public async attributes is a valid
+  namespace target. The package's identity is its entry-point
+  declaration; no `Namespace` import, no `@staticmethod` decorators,
+  no class wrapper required. Class-style targets (legacy
+  `module:Class` entry-point value) still work via the same discovery
+  pass.
+</Tip>
 
 ## How discovery works
 
 The runtime walks
 `importlib.metadata.entry_points(group="agentix.namespace")` at startup
-and records each `(name, module:class)` pair. **Nothing is imported
-yet.** The first `POST /_remote` for a given namespace triggers
-`ep.load()` under a per-namespace async lock, and the class becomes
-live for the rest of the runtime's life.
+and records each `(name, module_path)` pair. **Nothing is imported
+yet.** The first `POST /_remote` for a given namespace spawns
+`python -m agentix.runtime.worker --target <module_path>` using that
+namespace's venv interpreter; the worker imports the package, binds
+its public async functions via `Dispatcher`, and reports `ready`. The
+multiplexer reuses that worker for every subsequent call.
 
-Import errors are cached on the registry entry — a broken namespace
-fails calls to itself but never blocks boot or siblings. There is no
-on-disk manifest the runtime inspects; the wheel's installed metadata
-is the entire discovery contract.
+Boot errors surface on the first call to a broken namespace; siblings
+are unaffected. There is no on-disk manifest the runtime inspects —
+the wheel's installed metadata is the entire discovery contract.
 
-`agentix check` smoke-imports every installed namespace and reports the
-first failure. Two distributions registering the same entry-point name
-collide loudly with `PluginConflictError` — silent last-wins would hide
-a stale install.
+`agentix check` walks every installed namespace and confirms each has
+at least one discoverable async method. Two distributions registering
+the same entry-point name collide loudly with `PluginConflictError` —
+silent last-wins would hide a stale install.
 
 ## Streaming methods
 
-A method annotated `-> AsyncIterator[T]` opts into the streaming wire.
+A function annotated `-> AsyncIterator[T]` opts into the streaming wire.
 
-```python
+```python title="src/agentix/chatbot/__init__.py"
 from collections.abc import AsyncIterator
-from agentix.namespace import Namespace
 
-class Chatbot(Namespace):
-    @staticmethod
-    async def chat(prompt: str) -> AsyncIterator[str]:
-        proc = await asyncio.create_subprocess_exec("claude", "-p", prompt, ...)
-        async for line in proc.stdout:
-            yield line.decode()
+async def chat(prompt: str) -> AsyncIterator[str]:
+    proc = await asyncio.create_subprocess_exec("claude", "-p", prompt, ...)
+    async for line in proc.stdout:
+        yield line.decode()
 ```
 
 The caller iterates directly — **no `await` on the call site**:
 
 ```python
-async for token in c.remote(Chatbot.chat, prompt="…"):
+from agentix import chatbot
+async for token in c.remote(chatbot.chat, prompt="…"):
     print(token, end="")
 ```
 

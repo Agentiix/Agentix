@@ -28,7 +28,7 @@ from pydantic import TypeAdapter, ValidationError
 
 import agentix.trace as trace
 from agentix.idents import MethodName, PackageName
-from agentix.namespace import Namespace, discover_methods
+from agentix.namespace import discover_methods
 from agentix.runtime.models import (
     STREAM_ORIGINS,
     RemoteError,
@@ -165,17 +165,18 @@ class Dispatcher:
             input_item_adapter=input_item_adapter,
         )
 
-    def bind_namespace(self, cls: type[Namespace]) -> Dispatcher:
-        """Bind every public method of `cls`.
+    def bind_namespace(self, target: Any) -> Dispatcher:
+        """Bind every public async function on `target`.
 
-        Namespace methods are `@staticmethod` — the class is a namespace,
-        method bodies carry the real logic, the signature is the
-        contract. The dispatcher binds each function to itself (stub
-        and impl are the same callable). No instance is needed.
+        `target` is whatever the namespace's entry point points at —
+        typically a Python module (the package itself), or a class for
+        legacy class-style namespaces, or any object with discoverable
+        async attributes. The dispatcher binds each function to itself
+        (stub and impl are the same callable).
 
         Returns `self` for fluent use in entry-point loaders.
         """
-        for name, fn in discover_methods(cls):
+        for name, fn in discover_methods(target):
             self.bind(fn, fn)
         return self
 
@@ -525,17 +526,8 @@ class Registry:
             if entry.error is not None:
                 raise entry.error
             try:
-                cls = entry.loader()
-                if not isinstance(cls, type):
-                    raise TypeError(
-                        f"{package}: entry-point loader returned "
-                        f"{type(cls).__name__}, expected a class"
-                    )
-                if Namespace not in cls.__mro__ or cls is Namespace:
-                    raise TypeError(
-                        f"{package}: {cls.__name__} is not a Namespace subclass"
-                    )
-                entry.dispatcher = Dispatcher().bind_namespace(cls)
+                target = entry.loader()
+                entry.dispatcher = Dispatcher().bind_namespace(target)
             except Exception as exc:
                 logger.exception("lazy-load failed for namespace '%s'", package)
                 entry.error = exc

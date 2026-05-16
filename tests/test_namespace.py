@@ -1,9 +1,10 @@
-"""Unit tests for `Namespace`, `WirePattern`, and `Dispatcher.bind_namespace`.
+"""Unit tests for namespace discovery, `WirePattern`, and `Dispatcher.bind_namespace`.
 
-Covers the R1 typing rule (dynamic bind + static typing). Wire patterns
-are exercised at the `select_pattern` boundary — the three built-ins
-are fixed and not user-extensible. Closure-protocol-level integration
-is exercised in `test_namespace_protocol.py`.
+Discovery is duck-typed — a namespace can be a Python module, a class,
+or any object whose top-level attributes include async callables.
+Wire-pattern selection (Unary / Stream / Bidi) is exercised at the
+`select_pattern` boundary. End-to-end protocol tests live in
+`test_namespace_protocol.py`.
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ from collections.abc import AsyncIterator
 import pytest
 
 from agentix.dispatch import Dispatcher
-from agentix.namespace import Namespace, discover_methods
+from agentix.namespace import discover_methods
 from agentix.runtime.models import RemoteRequest
 from agentix.wire import (
     BidiPattern,
@@ -27,7 +28,7 @@ from agentix.wire import (
 
 
 def test_namespace_methods_only_lists_public_callables() -> None:
-    class N(Namespace):
+    class N:
         @staticmethod
         def public(x: int) -> int: ...
         @staticmethod
@@ -39,7 +40,7 @@ def test_namespace_methods_only_lists_public_callables() -> None:
 
 
 def test_namespace_excluded_hides_methods() -> None:
-    class N(Namespace):
+    class N:
         __namespace_excluded__ = frozenset({"hidden"})
 
         @staticmethod
@@ -55,7 +56,7 @@ def test_namespace_inherits_methods_from_namespace_ancestors() -> None:
     (e.g. for shared-mixin stubs). The composition rule applies to stub↔impl,
     not stub↔stub."""
 
-    class Base(Namespace):
+    class Base:
         @staticmethod
         def common() -> int: ...
 
@@ -98,7 +99,7 @@ def test_select_bidi_for_async_iterator_param_and_return() -> None:
 async def test_bind_namespace_routes_through_dispatcher() -> None:
     """A full Namespace round-trip: one class with real method bodies."""
 
-    class Math(Namespace):
+    class Math:
         @staticmethod
         async def add(a: int, b: int) -> int:
             return a + b
@@ -123,7 +124,7 @@ async def test_bind_namespace_routes_through_dispatcher() -> None:
 
 @pytest.mark.asyncio
 async def test_bind_namespace_picks_correct_pattern() -> None:
-    class N(Namespace):
+    class N:
         @staticmethod
         async def unary(x: int) -> int:
             return x
@@ -146,25 +147,18 @@ async def test_bind_namespace_picks_correct_pattern() -> None:
 
 
 @pytest.mark.asyncio
-async def test_bind_namespace_works_with_protocol_subclass() -> None:
-    """A Namespace subclass that's *also* a Protocol still binds fine —
-    the class IS the namespace; method bodies carry the real logic."""
-    from typing import Protocol, runtime_checkable
+async def test_bind_namespace_accepts_a_module() -> None:
+    """`bind_namespace` is duck-typed — modules work as namespaces too,
+    not just classes."""
+    import types
+    mod = types.ModuleType("test_inline_module_ns")
 
-    @runtime_checkable
-    class Greeting(Namespace, Protocol):
-        @staticmethod
-        async def hello(name: str) -> str: ...
+    async def hello(name: str) -> str:
+        return f"hi {name}"
 
-    # Test fixture: the real class has bodies. Pyright doesn't see this
-    # as instantiating a Protocol because Greeting isn't directly used as
-    # the impl — `bind_namespace` accepts the class and instantiates it.
-    class GreetingImpl(Greeting):  # noqa: ARG001  (Protocol subclass for typing)
-        @staticmethod
-        async def hello(name: str) -> str:
-            return f"hi {name}"
+    mod.hello = hello
 
-    d = Dispatcher().bind_namespace(GreetingImpl)
+    d = Dispatcher().bind_namespace(mod)
     assert d.methods() == ["hello"]
     resp = await d.dispatch(RemoteRequest(
         package="x", method="hello", args=[], kwargs={"name": "alice"},

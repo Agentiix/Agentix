@@ -1,108 +1,86 @@
-"""`Namespace` marker + method discovery for namespace stub classes.
+"""Method discovery for namespace targets.
 
-A namespace declares its public API as a `Namespace` subclass with
-`...`-bodied methods (the stub). The impl is a **separate, unrelated
-class** whose methods structurally match the stub. `_register.py`
-glues them together via `Dispatcher.bind_namespace(StubCls, impl_instance)`.
-See CLAUDE.md for the framework principle this enforces.
-
-```python
-# __init__.py — what callers import
-from agentix.namespace import Namespace
-
-class Bash(Namespace):
-    async def run(self, command: str) -> BashResult: ...
-
-# _impl.py — what only the sandbox imports. No inheritance from Bash.
-class BashImpl:
-    async def run(self, command: str) -> BashResult:
-        ...
-
-# _register.py — composes stub + impl
-from agentix.dispatch import Dispatcher
-from . import Bash
-from ._impl import BashImpl
-
-def register() -> Dispatcher:
-    return Dispatcher.bind_namespace(Bash, BashImpl())
-```
-
-`Namespace` is declared as an empty `Protocol`, so a namespace author who
-wants pyright to structurally verify their impl can declare the stub
-as a Protocol too:
+A namespace is whatever object the entry point points at — typically a
+Python package (`agentix.bash`), but the framework accepts any object
+that has public async / async-generator callables as attributes. There
+is no required base class or Protocol; discovery is duck-typed.
 
 ```python
-from typing import Protocol, runtime_checkable
+# src/agentix/bash/__init__.py
+async def run(command: str) -> BashResult:
+    ...
 
-@runtime_checkable
-class Bash(Namespace, Protocol):
-    async def run(self, command: str) -> BashResult: ...
+async def run_stream(command: str) -> AsyncIterator[BashEvent]:
+    ...
 
-# In _register.py — pyright would catch a structural mismatch here.
-impl: Bash = BashImpl()
-return Dispatcher.bind_namespace(Bash, impl)
+# Optional types / constants / private helpers — ignored by the framework
+DEFAULT_TIMEOUT = 30
+class BashResult(BaseModel): ...
+def _helper(): ...
 ```
 
-This is opt-in. The plain `class Bash(Namespace)` form works too — the
-framework discovers methods structurally and the runtime check at CI
-(`tools/check_stub_impl.py`) catches signature drift regardless.
+The entry point points at the package:
+
+```toml
+[project.entry-points."agentix.namespace"]
+bash = "agentix.bash"
+```
+
+The framework imports the package and `discover_methods` walks its
+top-level attributes for `async def` / `async def ... yield`
+functions. Constants, types, classes, and `_private` names are
+skipped.
 """
 
 from __future__ import annotations
 
 import inspect
 from collections.abc import Iterator
-from typing import Protocol, runtime_checkable
+from typing import Any
 
 
-@runtime_checkable
-class Namespace(Protocol):
-    """Marker Protocol for a namespace's typed surface.
+def discover_methods(target: Any) -> Iterator[tuple[str, Any]]:
+    """Yield `(name, function)` for each remote-callable attribute on `target`.
 
-    Declaring this as a Protocol means subclasses can opt into Protocol
-    semantics by adding `Protocol` to their own base list:
+    `target` can be a module (the recommended namespace shape — the
+    package itself), a class (for class-style namespaces), or any
+    object exposing attributes via `vars()`.
 
-        class Bash(Namespace, Protocol):
-            ...
+    Discovery rules differ by shape because module top levels are
+    cluttered with imports (`dataclass`, `Field`, helper types) that
+    shouldn't be remote-callable:
 
-    A plain `class Bash(Namespace)` is a nominal class that structurally
-    satisfies `Namespace` trivially (empty interface). Either form works
-    with `Dispatcher.bind_namespace`.
+      * **Module target:** keep public **async** functions / async
+        generators only. Sync imports (`dataclass`, `Field`, etc.) and
+        classes/constants are skipped.
+      * **Class target:** keep any public function (sync or async,
+        plus `@staticmethod` wrappers). Classes are explicit
+        namespaces — every method on them is intentional.
+
+    Names starting with `_` and names listed in
+    `target.__namespace_excluded__` are skipped in both cases. For
+    class targets the MRO is walked (skipping `object`) and subclass
+    overrides take priority.
     """
-
-
-def discover_methods(cls: type) -> Iterator[tuple[str, object]]:
-    """Yield `(name, function)` for each public ABI method on `cls`.
-
-    Closure methods are declared `@staticmethod` — the class is a pure
-    namespace, methods carry no instance state. Walks the MRO (skipping
-    `Namespace`, `Protocol`, and `object`), filtering:
-
-      * names starting with `_` (private)
-      * names listed in `cls.__namespace_excluded__` if defined
-
-    Both `@staticmethod`-decorated functions and plain `def` (legacy)
-    are accepted; the underlying function is returned in both cases.
-    Subclass overrides take priority (the MRO walk yields the
-    most-derived definition first).
-    """
-    excluded = frozenset(getattr(cls, "__namespace_excluded__", frozenset()))
+    excluded = frozenset(getattr(target, "__namespace_excluded__", frozenset()))
     seen: set[str] = set()
-    skip_classes = {Namespace, Protocol, object}
-    for klass in cls.__mro__:
-        if klass in skip_classes:
-            continue
-        for name, value in vars(klass).items():
-            if name in seen or name in excluded:
+    is_module = inspect.ismodule(target)
+
+    if inspect.isclass(target):
+        sources = [k for k in target.__mro__ if k is not object]
+    else:
+        sources = [target]
+
+    for src in sources:
+        for name, value in vars(src).items():
+            if name in seen or name in excluded or name.startswith("_"):
                 continue
-            if name.startswith("_"):
-                continue
-            if isinstance(value, staticmethod):
+            fn = value.__func__ if isinstance(value, staticmethod) else value
+            is_async = inspect.iscoroutinefunction(fn) or inspect.isasyncgenfunction(fn)
+            is_sync_fn = inspect.isfunction(fn) and not is_async
+            if is_async or (is_sync_fn and not is_module):
                 seen.add(name)
-                yield name, value.__func__
-            elif inspect.isfunction(value):
-                seen.add(name)
-                yield name, value
+                yield name, fn
 
 
-__all__ = ["Namespace", "discover_methods"]
+__all__ = ["discover_methods"]

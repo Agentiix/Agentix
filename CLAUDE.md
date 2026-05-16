@@ -24,21 +24,21 @@ Downstream repos (`Agentix-Agents-Hub`, `Agentix-Datasets`) are updated in locks
 
 ## Architecture (typed Python namespaces, entry-point discovery)
 
-The substrate is a single Python runtime process inside a sandbox container, into which **namespace dists install their Python packages**. The runtime walks `importlib.metadata.entry_points(group="agentix.namespace")` at start-up to discover them and dispatches `c.remote(Bash.run, ...)` calls in-process. No subprocess per namespace, no UDS, no reverse-proxy, no manifest files.
+A namespace is a **Python package** (`agentix.<short>`) whose top-level async functions are the remote-callable surface. Caller-side, `c.remote(bash.run, ...)` reads `bash.run.__module__` as the routing key. Server-side, the runtime walks `importlib.metadata.entry_points(group="agentix.namespace")` to discover packages, then **spawns one worker subprocess per namespace** (using each namespace's own venv interpreter) and forwards RPC frames over stdin/stdout — full per-extension dep isolation, no in-process import of namespace code.
 
-The word *namespace* here means the framework-recognized unit of extension on the dispatch axis: a Python class whose `@staticmethod` methods are the remote-callable surface. (The other plugin axis — deployments — is documented in `docs/deployment.mdx`; host-side hooks like trace sinks are in `docs/extend-runtime.mdx`.)
+The other plugin axis — deployments — is documented in `docs/deployment.mdx`; host-side hooks (trace pub/sub, wire patterns, spec resolvers, CLI verbs) are in `docs/extend-runtime.mdx`.
 
 ### The extension contract
 
-A namespace is a normal Python distribution that declares one `agentix.namespace` entry point:
+A namespace is a normal Python distribution that declares one `agentix.namespace` entry point pointing at the package:
 
 ```toml
 # pyproject.toml — the entire framework-facing surface
 [project.entry-points."agentix.namespace"]
-bash = "agentix.bash:Bash"
+bash = "agentix.bash"
 ```
 
-That's it. Key (`bash`) is the short name for display; value (`agentix.bash:Bash`) names the module and the `Namespace` subclass to load. The framework imports and binds the class on first dispatch.
+That's it. Key (`bash`) is the short name for display; value (`agentix.bash`) is the Python import path of the namespace package. The framework imports that module and discovers its async functions on first dispatch. (A legacy `module:Class` form is also accepted — `discover_methods` is duck-typed — but module-as-namespace is the recommended shape.)
 
 ### Namespace source layout
 
@@ -48,38 +48,47 @@ A namespace is a **normal Python project** (the shape `uv init --lib` produces) 
 primitives/bash/
 ├── pyproject.toml                  # name = "agentix-bash", [project.entry-points."agentix.namespace"]
 └── src/agentix/bash/               # `agentix/` has no __init__.py (PEP 420 namespace package)
-    └── __init__.py                 # `class Bash(Namespace)` with @staticmethod bodies
+    └── __init__.py                 # async def run(...), async def run_stream(...), dataclasses, …
 ```
 
-The framework's `agentix/__init__.py` extends its `__path__` via `pkgutil.extend_path`, so once a namespace dist installs files at `<site-packages>/agentix/bash/`, `from agentix.bash import Bash` resolves. Multiple namespace dists can install peer entries under `agentix/` without colliding.
+The framework's `agentix/__init__.py` extends its `__path__` via `pkgutil.extend_path`, so once a namespace dist installs files at `<site-packages>/agentix/bash/`, `from agentix import bash` resolves and `bash.run` is the remote-callable function. Multiple namespace dists can install peer entries under `agentix/` without colliding.
 
 Reserved by the framework — namespace dists may not shadow: `agentix.cli`, `agentix.deployment`, `agentix.dispatch`, `agentix.idents`, `agentix.models`, `agentix.namespace`, `agentix.rollout`, `agentix.runtime`, `agentix.trace`, `agentix.wire`. Everything else under `agentix.*` is fair game.
 
-### The class IS the namespace
+### The package IS the namespace
 
 ```python
 # src/agentix/bash/__init__.py
-from agentix.namespace import Namespace
+from dataclasses import dataclass
 
-class Bash(Namespace):
-    @staticmethod
-    async def run(command: str) -> BashResult:
-        proc = await asyncio.create_subprocess_shell(command, ...)
-        ...
+@dataclass
+class BashResult:               # type — caller imports it for return annotations
+    exit_code: int
+    stdout: str
+
+DEFAULT_TIMEOUT = 30            # constant — caller imports it as a value
+
+async def run(command: str, timeout: float = DEFAULT_TIMEOUT) -> BashResult:
+    proc = await asyncio.create_subprocess_shell(command, ...)
+    ...
+
+def _helper():                  # private — framework skips it
+    ...
 ```
 
-* `class Bash(Namespace)` declares the namespace. The methods are `@staticmethod` — the class is a pure namespace, no `self`, no instance state.
-* Method bodies are the **real implementation**. There's no stub vs impl split. Namespaces with heavy dependencies use *lazy imports inside methods* if they want to avoid paying import cost on caller-side.
-* No `_register.py`, no `_impl.py`, no `<Name>Impl` convention, no `manifest.json`. The framework reads `pyproject.toml` for metadata via `importlib.metadata` and loads the class via entry points.
+* **Discovery is duck-typed.** The framework walks the package's top-level attributes and picks the public **async** functions (`async def` / `async def ... yield`). Sync helpers, dataclasses, constants, and `_private` names are ignored by the framework but available to callers via normal import.
+* **Method bodies are the real implementation.** There's no stub vs impl split.
+* **No marker base class.** Namespace authors don't import or inherit from anything framework-specific — the package's identity comes from its entry-point declaration.
+* **Class-style targets still work.** If you prefer `class XYZ:` with `@staticmethod` methods (e.g. for IDE-grouped autocomplete), declare the entry point as `xyz = "agentix.xyz:XYZ"` and the dispatcher walks the class instead. Duck typing means the framework accepts either shape.
 
 `pip install ./primitives/bash` works as-is. `pytest`, `pyright`, `ruff`, `uv build` — every standard Python tool works against the namespace's source dir without further configuration.
 
 Build infrastructure is shared, not per-namespace:
 
-- `primitives/_template/Dockerfile` — same for every namespace
-- `primitives/_template/default.nix` — same for every namespace; pulls metadata from the namespace's `pyproject.toml`
+- `primitives/_template/Dockerfile` — the runtime image's Dockerfile; bundle images extend it
+- Per-namespace `default.nix` (optional) — only when the namespace needs native system deps
 
-The runtime loads each namespace lazily — the entry-point object is captured at startup but `ep.load()` only runs on first dispatch for that namespace. A broken namespace surfaces on call, not at boot.
+The runtime loads each namespace lazily — the worker subprocess for a namespace is spawned on first `/_remote` call to that namespace; subsequent calls reuse the same worker.
 
 ### Extension axes beyond namespaces
 

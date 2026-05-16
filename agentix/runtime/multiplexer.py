@@ -387,6 +387,8 @@ class NamespaceMultiplexer:
                 for ep in dist.entry_points:
                     if ep.group != NAMESPACE_ENTRY_POINT_GROUP:
                         continue
+                    # See _discover_from_current_env: package routing key
+                    # is the left-of-colon portion (the module path).
                     package = ep.value.split(":", 1)[0]
                     self._entries[package] = _NamespaceEntry(
                         package=package,
@@ -406,6 +408,9 @@ class NamespaceMultiplexer:
             dist = ep.dist
             dist_name = getattr(dist, "name", "") if dist else ""
             dist_version = getattr(dist, "version", "") if dist else ""
+            # Entry-point value is either `module` (package-as-namespace,
+            # recommended) or `module:attr` (legacy class-style). Either
+            # way the package routing key is the module path on the left.
             package = ep.value.split(":", 1)[0]
             self._entries[package] = _NamespaceEntry(
                 package=package, dist_name=dist_name, dist_version=dist_version,

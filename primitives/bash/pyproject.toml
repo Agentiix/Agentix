@@ -9,11 +9,11 @@ description = "Bash command execution primitive for Agentix"
 requires-python = ">=3.11"
 dependencies = []
 
-# Entry points are the framework's sole namespace-discovery contract.
-# `bash = "agentix.bash:Bash"` tells the runtime to import `agentix.bash`
-# and load the `Bash` class on first dispatch.
+# Entry-point value points at the package; the framework walks
+# `agentix.bash`'s top-level attributes for async callables on first
+# dispatch. No class wrapper, no `:attr` suffix.
 [project.entry-points."agentix.namespace"]
-bash = "agentix.bash:Bash"
+bash = "agentix.bash"
 
 [tool.hatch.build.targets.wheel]
 # Package the `agentix.bash` namespace contribution. `src/agentix/` has

@@ -15,15 +15,14 @@
 A small framework that lets you compose agent / dataset / primitive code into a sandbox and call it from your trainer or harness as if it were local typed Python:
 
 ```python
-from agentix import RuntimeClient
-from agentix.bash import Bash
-from agentix.claude_code import ClaudeCode      # pip install agentix-claude-code
-from agentix.swebench import SWEBench           # pip install agentix-swebench
+from agentix import RuntimeClient, bash
+from agentix import claude_code        # pip install agentix-claude-code
+from agentix import swebench           # pip install agentix-swebench
 
 async with RuntimeClient(sandbox_url) as c:
-    task   = await c.remote(SWEBench.get_task, idx=42)
-    patch  = await c.remote(ClaudeCode.run, instruction=task.problem)
-    reward = await c.remote(SWEBench.score, idx=42, patch=patch)
+    task   = await c.remote(swebench.get_task, idx=42)
+    patch  = await c.remote(claude_code.run, instruction=task.problem)
+    reward = await c.remote(swebench.score, idx=42, patch=patch)
 ```
 
 Every extension is a normal pip-installable distribution. There is no custom config file, no decorator at import time, no per-framework registry call: the user installs a wheel and the framework discovers it via Python entry points.
@@ -61,19 +60,15 @@ The four subcommands are framework built-ins. Third parties that want their own 
 
 ## Writing a namespace
 
-A namespace is a class whose `@staticmethod` methods are the remote-callable surface. The class is a pure namespace — methods carry no `self`, no instance state.
+A namespace is a Python **package** — `agentix.<short>` — whose top-level async functions are the remote-callable surface. The framework duck-types the discovery: dataclasses, constants, and other helpers can coexist in the same package; they're regular Python imports for callers, not remote methods.
 
 ```python
 # src/agentix/myagent/__init__.py
-from agentix.namespace import Namespace
-
-class MyAgent(Namespace):
-    @staticmethod
-    async def run(instruction: str) -> str:
-        ...
+async def run(instruction: str) -> str:
+    ...
 ```
 
-Ship it with one entry-point declaration:
+Ship it with one entry-point declaration pointing at the **package**:
 
 ```toml
 # pyproject.toml
@@ -82,7 +77,7 @@ name = "agentix-myagent"
 version = "0.1.0"
 
 [project.entry-points."agentix.namespace"]
-myagent = "agentix.myagent:MyAgent"
+myagent = "agentix.myagent"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/agentix"]
@@ -91,8 +86,8 @@ packages = ["src/agentix"]
 `pip install agentix-myagent` is the entire setup. Caller-side:
 
 ```python
-from agentix.myagent import MyAgent
-result = await c.remote(MyAgent.run, instruction="...")
+from agentix import myagent
+result = await c.remote(myagent.run, instruction="...")
 ```
 
 The framework's `agentix/__init__.py` extends `__path__` so `agentix.<your-namespace>` resolves natively; PEP 420 namespace packages mean multiple dists can install peer entries under `agentix/` without colliding. Reserved framework subpackages (`agentix.cli`, `agentix.dispatch`, `agentix.deployment`, …) are listed in [CLAUDE.md](CLAUDE.md).

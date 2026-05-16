@@ -10,7 +10,6 @@ import httpx
 import pytest
 
 from agentix import RuntimeClient
-from agentix.namespace import Namespace
 from agentix.runtime.models import RemoteRequest, TraceEvent
 
 pytestmark = pytest.mark.asyncio
@@ -19,7 +18,7 @@ pytestmark = pytest.mark.asyncio
 # ── trace pipeline ──────────────────────────────────────────────
 
 
-class Tracer(Namespace):
+class Tracer:
     @staticmethod
     async def step(label: str) -> int:
         from agentix import trace
@@ -188,13 +187,13 @@ async def test_llm_proxy_rejects_unknown_provider(runtime_module, live_server):
 # ── RolloutPool ─────────────────────────────────────────────────
 
 
-class EchoNs(Namespace):
+class EchoNs:
     @staticmethod
     async def echo(msg: str) -> str:
         return f"echo:{msg}"
 
 
-class Splody(Namespace):
+class Splody:
     @staticmethod
     async def explode_on(label: str) -> str:
         if label == "bad":

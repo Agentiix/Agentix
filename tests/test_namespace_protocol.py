@@ -22,7 +22,6 @@ import httpx
 import pytest
 
 from agentix import RemoteCallError, RuntimeClient
-from agentix.namespace import Namespace
 from agentix.runtime.models import RemoteRequest
 
 pytestmark = pytest.mark.asyncio
@@ -36,13 +35,13 @@ class EchoResult:
     msg: str
 
 
-class Echo(Namespace):
+class Echo:
     @staticmethod
     async def echo(msg: str) -> EchoResult:
         return EchoResult(msg=f"echo:{msg}")
 
 
-class Boom(Namespace):
+class Boom:
     @staticmethod
     async def go() -> str:
         raise RuntimeError("kaboom")
@@ -54,7 +53,7 @@ class Token:
     idx: int
 
 
-class Streamer(Namespace):
+class Streamer:
     @staticmethod
     async def chat(prompt: str, n: int = 3) -> AsyncIterator[Token]:
         for i in range(n):
@@ -71,7 +70,7 @@ class ReplyMsg:
     text: str
 
 
-class Chat(Namespace):
+class Chat:
     @staticmethod
     async def chat(
         messages: AsyncIterator[UserMsg],
@@ -81,7 +80,7 @@ class Chat(Namespace):
             yield ReplyMsg(text=f"{prefix}{m.text}")
 
 
-class Talker(Namespace):
+class Talker:
     @staticmethod
     async def speak() -> str:
         logging.getLogger("agentix.test.talker").info("hello-from-impl")
