@@ -37,7 +37,7 @@ A namespace is a class whose `@staticmethod` methods are the callable
 surface. Methods carry the real implementation; the class is a
 namespace.
 
-```python src/agentix/myagent/__init__.py
+```python title="src/agentix/myagent/__init__.py"
 from agentix.namespace import Namespace
 
 class MyAgent(Namespace):
@@ -46,7 +46,7 @@ class MyAgent(Namespace):
         ...
 ```
 
-```toml pyproject.toml
+```toml title="pyproject.toml"
 [project]
 name = "agentix-myagent"
 version = "0.1.0"
@@ -67,7 +67,7 @@ and use `await c.remote(MyAgent.run, instruction=...)`. See
 A deployment manages sandbox lifecycle. Structural type — implement
 the three methods, no inheritance.
 
-```python my_deploy/__init__.py
+```python title="my_deploy/__init__.py"
 from agentix.deployment.base import Sandbox
 from agentix.idents import SandboxId
 from agentix.models import SandboxConfig, SandboxInfo
@@ -83,7 +83,7 @@ class FlyDeployment:
     async def get(self, sandbox_id: SandboxId) -> SandboxInfo: ...
 ```
 
-```toml pyproject.toml
+```toml title="pyproject.toml"
 [project.entry-points."agentix.deployment"]
 fly = "my_deploy:FlyDeployment"
 ```

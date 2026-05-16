@@ -40,7 +40,7 @@ under `agentix.*` is fair game.
 
 ## The class IS the namespace
 
-```python src/agentix/myagent/__init__.py
+```python title="src/agentix/myagent/__init__.py"
 from agentix.namespace import Namespace
 
 class MyAgent(Namespace):
@@ -63,7 +63,7 @@ class MyAgent(Namespace):
 
 ## Entry-point declaration
 
-```toml pyproject.toml
+```toml title="pyproject.toml"
 [project]
 name = "agentix-myagent"
 version = "0.1.0"
@@ -184,7 +184,7 @@ reference and its signature carry everything the wire needs.
 A method annotated `-> AsyncIterator[T]` (or `AsyncGenerator[T, ...]`)
 opts into the streaming wire.
 
-```python src/agentix/chatbot/__init__.py
+```python title="src/agentix/chatbot/__init__.py"
 from collections.abc import AsyncIterator
 from agentix.namespace import Namespace
 

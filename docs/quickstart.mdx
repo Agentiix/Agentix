@@ -63,7 +63,7 @@ via `agentix deploy --help`.
 
 ## Call a namespace
 
-```python hello_sandbox.py
+```python title="hello_sandbox.py"
 import asyncio
 from agentix import RuntimeClient, SandboxConfig
 from agentix.deployment.base import session
@@ -119,7 +119,7 @@ produces — plus one entry-point block.
 
 <Tabs>
   <Tab title="Source">
-    ```python src/agentix/myagent/__init__.py
+    ```python title="src/agentix/myagent/__init__.py"
     from agentix.namespace import Namespace
 
     class MyAgent(Namespace):
@@ -132,7 +132,7 @@ produces — plus one entry-point block.
     ```
   </Tab>
   <Tab title="pyproject.toml">
-    ```toml pyproject.toml
+    ```toml title="pyproject.toml"
     [project]
     name = "agentix-myagent"
     version = "0.1.0"
