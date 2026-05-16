@@ -3,13 +3,12 @@ title: Integrate an agent
 description: Wrap an agent CLI (Claude Code, Aider, OpenHands, Codex …) as an Agentix namespace.
 ---
 
-An **agent** in Agentix is just a namespace whose class wraps a CLI
-binary. The caller invokes `c.remote(YourAgent.run, instruction="…")`
-and the method body — running inside the sandbox — `exec`s the binary,
-collects its output, and returns a typed result.
+An **agent** in Agentix is a namespace whose method shells out to a
+CLI binary. The caller invokes `c.remote(claude_code.run, ...)`; the
+body — running inside the sandbox — execs the binary and returns a
+typed result.
 
-This guide ports `claude-code` as the worked example; the same pattern
-applies to any CLI agent.
+This guide ports `claude-code` as the worked example.
 
 ## 1. Source layout
 
@@ -17,27 +16,18 @@ applies to any CLI agent.
 agentix-claude-code/
 ├── pyproject.toml
 ├── default.nix              # Nix derivation — pulls the claude CLI binary
-├── Dockerfile               # copies primitives/_template/Dockerfile
 └── src/agentix/
     └── claude_code/
-        └── __init__.py      # class ClaudeCode(Namespace)
+        └── __init__.py      # async def run(...), types
 ```
 
-The Dockerfile and Nix derivation come from the
-[`primitives/_template/`](https://github.com/Agentiix/Agentix/tree/master/primitives/_template)
-copy — agent images are structurally identical to primitive images,
-they just bundle a different binary.
-
-## 2. Result type and method
+## 2. Method surface
 
 ```python title="src/agentix/claude_code/__init__.py"
 from __future__ import annotations
 import asyncio
 import os
 from dataclasses import dataclass
-from typing import Literal
-
-from agentix.namespace import Namespace
 
 
 @dataclass
@@ -45,57 +35,46 @@ class RunResult:
     exit_code: int
     stdout: str
     stderr: str
-    patch: str          # extracted diff if the agent produced one
 
 
-class ClaudeCode(Namespace):
-    """Claude Code CLI wrapped as a namespace."""
+async def run(
+    instruction: str,
+    *,
+    workdir: str = "/testbed",
+    timeout: float = 600,
+    model: str | None = None,
+    max_turns: int | None = None,
+    env: dict[str, str] | None = None,
+) -> RunResult:
+    cmd = ["claude", "-p", instruction, "--print", "--permission-mode", "bypassPermissions"]
+    if model:
+        cmd += ["--model", model]
+    if max_turns is not None:
+        cmd += ["--max-turns", str(max_turns)]
 
-    __image__ = "agentix-hub/claude-code:0.1.0"
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        cwd=workdir,
+        env={**os.environ, **(env or {})},
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except TimeoutError:
+        proc.kill()
+        await proc.communicate()
+        return RunResult(exit_code=-1, stdout="", stderr=f"timed out after {timeout}s")
 
-    @staticmethod
-    async def run(
-        instruction: str,
-        *,
-        workdir: str = "/testbed",
-        timeout: float = 600,
-        model: str | None = None,
-        max_turns: int | None = None,
-        env: dict[str, str] | None = None,
-    ) -> RunResult:
-        cmd = ["claude", "-p", instruction, "--print"]
-        if model:
-            cmd += ["--model", model]
-        if max_turns is not None:
-            cmd += ["--max-turns", str(max_turns)]
-
-        sub_env = {**os.environ, **(env or {})}
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            cwd=workdir,
-            env=sub_env,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        except TimeoutError:
-            proc.kill()
-            await proc.communicate()
-            return RunResult(exit_code=-1, stdout="", stderr="timeout", patch="")
-
-        return RunResult(
-            exit_code=proc.returncode or 0,
-            stdout=stdout.decode(errors="replace"),
-            stderr=stderr.decode(errors="replace"),
-            patch=_extract_patch(stdout, workdir),
-        )
+    return RunResult(
+        exit_code=proc.returncode or 0,
+        stdout=stdout.decode(errors="replace"),
+        stderr=stderr.decode(errors="replace"),
+    )
 ```
 
-Method-body code runs **inside the sandbox**, alongside the runtime
-process. Anything you can do in a Python `asyncio.create_subprocess_exec`
-call is fair game — including reading from / writing to the sandbox
-filesystem, which is exactly what the agent needs.
+The method body runs **inside the sandbox** — anything an
+`asyncio.create_subprocess_exec` call can do is fair game.
 
 ## 3. Entry point + packaging
 
@@ -106,96 +85,85 @@ version = "0.1.0"
 requires-python = ">=3.11"
 
 [project.entry-points."agentix.namespace"]
-claude_code = "agentix.claude_code:ClaudeCode"
+claude_code = "agentix.claude_code"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/agentix"]
 ```
 
-`pip install agentix-claude-code` resolves `from agentix.claude_code import ClaudeCode`
-on the caller side. `agentix build ./agentix-claude-code` produces the
-image; the runtime loads the class on first dispatch.
+`pip install agentix-claude-code` resolves
+`from agentix.claude_code import run` on the caller side.
+`agentix build ./agentix-claude-code` produces the image.
 
-## 4. Streaming output
+## 4. Extract the patch on the caller
 
-Long-running agents benefit from a streaming variant. Add a method that
-returns `AsyncIterator[Event]` and the wire upgrades to Socket.IO
-automatically:
+Patch extraction is a generic "what changed in this workdir"
+operation — keep it on the caller, not in the agent namespace:
+
+```python
+diff = await c.remote(
+    bash.run,
+    command=f"cd /testbed && git add -A && git diff --cached --no-color",
+)
+patch = diff.stdout
+```
+
+The same call works for any agent that edited files.
+
+## 5. Streaming output
+
+For long-running agents, add a streaming variant. A function annotated
+`-> AsyncIterator[Event]` auto-upgrades to Socket.IO:
 
 ```python
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
+from typing import Literal
 
-class ClaudeCodeEvent: ...
 
 @dataclass
-class TokenChunk(ClaudeCodeEvent):
+class TokenChunk:
     text: str
     type: Literal["token"] = "token"
 
-@dataclass
-class ToolCall(ClaudeCodeEvent):
-    tool: str
-    args: dict
-    type: Literal["tool"] = "tool"
 
 @dataclass
-class RunDone(ClaudeCodeEvent):
+class RunDone:
     result: RunResult
     type: Literal["done"] = "done"
 
 
-class ClaudeCode(Namespace):
-    @staticmethod
-    async def run_stream(
-        instruction: str,
-        **kwargs,
-    ) -> AsyncIterator[ClaudeCodeEvent]:
-        proc = await asyncio.create_subprocess_exec(
-            "claude", "-p", instruction, "--output-format", "stream-json",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        async for raw in proc.stdout:
-            event = json.loads(raw)
-            match event["type"]:
-                case "token":   yield TokenChunk(text=event["text"])
-                case "tool":    yield ToolCall(tool=event["name"], args=event["args"])
-                case "done":    yield RunDone(result=_build_result(event))
+async def run_stream(instruction: str, **kwargs) -> AsyncIterator[TokenChunk | RunDone]:
+    proc = await asyncio.create_subprocess_exec(
+        "claude", "-p", instruction, "--output-format", "stream-json",
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    async for raw in proc.stdout:
+        event = json.loads(raw)
+        match event["type"]:
+            case "token":  yield TokenChunk(text=event["text"])
+            case "done":   yield RunDone(result=_build_result(event))
 ```
 
 Callers iterate without `await`:
 
 ```python
-async for ev in c.remote(ClaudeCode.run_stream, instruction="…"):
+async for ev in c.remote(claude_code.run_stream, instruction="…"):
     match ev:
-        case TokenChunk(text=t):    print(t, end="")
-        case ToolCall(tool=name):   logger.info(f"tool: {name}")
-        case RunDone(result=r):     return r
+        case TokenChunk(text=t): print(t, end="")
+        case RunDone(result=r):  return r
 ```
 
-## 5. The Nix derivation
+## 6. The Nix derivation
 
-Agent CLIs are usually unpackaged outside of Nix. The simplest path:
-fetch the upstream tarball, copy the binary into a `symlinkJoin`, and
-expose it on `entry/bin`. Copy
-[`primitives/_template/default.nix`](https://github.com/Agentiix/Agentix/tree/master/primitives/_template)
-and replace the body with your fetch + assemble logic. See
-`Agentix-Agents-Hub/claude-code/default.nix` for a working reference.
+Agent CLIs are usually unpackaged outside Nix. The simplest path:
+fetch the upstream tarball, copy the binary, expose it on `bin/`.
+See [`agentix-cookbook/claude-code/default.nix`](https://github.com/Agentiix/agentix-cookbook/blob/main/claude-code/default.nix)
+for a working reference.
 
-## Common patterns
+## Secrets and workdir
 
-- **Pass secrets through `env=`.** Don't embed API keys in the image;
-  callers pass them per-call.
-- **Default `workdir=/testbed`.** Most benchmarks mount the repo there.
-- **Time out aggressively.** Long-running agents hang; the caller
-  expects bounded latency.
-- **Return a structured `patch` field.** Even if the agent doesn't
-  speak diffs natively, `git diff` against the workdir at the end is
-  cheap and benchmark-friendly.
-
-## When you write one
-
-Each new agent CLI gets its own namespace. Don't try to abstract over
-multiple agents in one class — agent-specific knobs (model, reasoning
-effort, max turns, budget caps) belong on the namespace surface, not
-hidden behind a generic interface.
+- Pass API keys per call via `env={"ANTHROPIC_API_KEY": "..."}`. Don't
+  bake them into the image.
+- Default `workdir=/testbed`. Most benchmarks mount the repo there.
+- Bound `timeout` aggressively. Long-running agents hang.

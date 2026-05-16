@@ -1,22 +1,12 @@
 ---
 title: Quick start
-description: Install Agentix, call a namespace inside a sandbox, then write your own — in five minutes.
+description: Install Agentix, call a namespace inside a sandbox, then write your own.
 ---
-
-Install Agentix, call a namespace inside a sandbox, then write your own —
-in five minutes.
-
-<Tip>
-  Looking for a deeper tour? See the concept pages for
-  [Namespace](/namespace) and [Deployment](/deployment), or
-  [Architecture](/reference/architecture) for how the runtime
-  dispatches calls.
-</Tip>
 
 ## Prerequisites
 
 - Python 3.11 or newer
-- Docker (for the `local` deployment used below)
+- Docker (for the `local` deployment)
 
 ## Install
 
@@ -40,106 +30,61 @@ in five minutes.
   </Tab>
 </Tabs>
 
-`agentix` is the framework; `agentix-bash` and `agentix-files` are
-**namespaces** — independently versioned wheels that contribute the
-remote-callable `Bash` and `Files` classes. Namespaces and deployments
-are the two plugin axes; both follow the same pattern: one wheel, one
-entry-point block.
-
-## Verify the install
+## Verify
 
 ```bash
 agentix check
 ```
 
 ```text
-OK   bash    agentix.bash:Bash    agentix-bash@0.1.0
-OK   files   agentix.files:Files  agentix-files@0.1.0
+OK   bash    agentix.bash    agentix-bash@0.1.0
+OK   files   agentix.files   agentix-files@0.1.0
 ```
-
-`agentix check` walks `importlib.metadata.entry_points(group="agentix.namespace")`,
-imports each one, and surfaces any that fail. Deployments are listed
-via `agentix deploy --help`.
 
 ## Call a namespace
 
 ```python title="hello_sandbox.py"
 import asyncio
-from agentix import RuntimeClient, SandboxConfig
+from agentix import RuntimeClient, SandboxConfig, bash
 from agentix.deployment.base import session
 from agentix.deployment.docker import DockerDeployment
-from agentix.bash import Bash
 
 async def main():
     deployment = DockerDeployment()
-    # `agentix build bash -o my-bash:0.1.0` produces this image.
-    config = SandboxConfig(image="my-bash:0.1.0")
+    config = SandboxConfig(image="my-bash:0.1.0")   # `agentix build bash -o my-bash:0.1.0`
     async with session(deployment, config) as sandbox:
         async with RuntimeClient(sandbox.runtime_url) as c:
-            result = await c.remote(Bash.run, command="echo hi")
-            print(result.stdout)   # → "hi\n"
+            r = await c.remote(bash.run, command="echo hi")
+            print(r.stdout)   # → "hi\n"
 
 asyncio.run(main())
 ```
-
-A few things happening here:
-
-1. **`from agentix.bash import Bash`** — the typed surface.
-   `pip install agentix-bash` makes this import resolve. Methods carry
-   the real implementation; you call them via `c.remote(...)`, which
-   executes them inside the sandbox.
-2. **`DockerDeployment()`** is the built-in `local` deployment. Swap in
-   another backend with `load_deployment("daytona")` or
-   `load_deployment("e2b")`.
-3. **`SandboxConfig(image="my-bash:0.1.0")`** — one deploy-ready bundle
-   image, built by `agentix build`. Contains the runtime + every namespace's
-   Python package, plus any system deps.
-4. **`session(deployment, config)`** is a free function — composition
-   over inheritance. It creates the sandbox on entry and tears it down
-   on exit.
-5. **`c.remote(Bash.run, ...)`** reads `Bash.run.__module__`
-   (= `"agentix.bash"`) as the routing key. Returns a tagged variant
-   (`Unary` / `Stream` / `Bidi`) that supports `await` or `async for`
-   directly — call shape is detected from the function. Unary calls
-   ride `POST /_remote`; streaming/bidi auto-upgrade to Socket.IO.
-
-Run it:
 
 ```bash
 python hello_sandbox.py
 # → hi
 ```
 
-The first run pulls the bundle image (≈ 30 s).
-Subsequent sandboxes start in about 100 ms.
+First run pulls the bundle image (~30 s). Subsequent sandboxes start
+in ~100 ms.
 
 ## Write your own namespace
-
-A namespace is a normal Python project — whatever `uv init --lib`
-produces — plus one entry-point block.
 
 <Tabs>
   <Tab title="Source">
     ```python title="src/agentix/myagent/__init__.py"
-    from agentix.namespace import Namespace
-
-    class MyAgent(Namespace):
-        """Optional class docstring — surfaces in /namespaces output."""
-
-        @staticmethod
-        async def run(instruction: str) -> str:
-            # the real implementation — runs inside the sandbox
-            return f"did: {instruction}"
+    async def run(instruction: str) -> str:
+        return f"did: {instruction}"
     ```
   </Tab>
   <Tab title="pyproject.toml">
-    ```toml title="pyproject.toml"
+    ```toml
     [project]
     name = "agentix-myagent"
     version = "0.1.0"
 
     [project.entry-points."agentix.namespace"]
-    myagent = "agentix.myagent:MyAgent"
+    myagent = "agentix.myagent"
 
     [tool.hatch.build.targets.wheel]
     packages = ["src/agentix"]
@@ -152,47 +97,34 @@ produces — plus one entry-point block.
     └── src/
         └── agentix/                  # PEP 420 namespace package, no __init__.py
             └── myagent/
-                └── __init__.py       # class MyAgent(Namespace)
+                └── __init__.py
     ```
   </Tab>
 </Tabs>
 
-<Warning>
-  **Composition over inheritance.** `MyAgent` subclasses `Namespace`
-  purely for the discovery hook — its methods are `@staticmethod` with
-  no `self` and no instance state. Do **not** create a separate
-  `MyAgentImpl` that inherits from `MyAgent`. If you split an impl from
-  a stub, compose them with `Dispatcher.bind_namespace` instead.
-</Warning>
-
-Build, bundle, deploy:
-
 ```bash
 agentix build ./my-namespace                       # → agentix/myagent:0.1.0
 agentix build bash myagent -o my-bundle:0.1.0      # bundle several namespaces
-agentix deploy local --image my-bundle:0.1.0       # run a sandbox
+agentix deploy local --image my-bundle:0.1.0
 ```
 
 `pip install agentix-myagent` is everything your users need. The
 framework discovers the entry point, and
-`from agentix.myagent import MyAgent` resolves natively in their code.
+`from agentix.myagent import run` resolves natively in their code.
 
 ## Next
 
 <CardGroup cols={2}>
   <Card title="Integrate an agent" icon="robot" href="/integrate-agent">
-    Wrap an agent CLI (Claude Code, Aider, OpenHands) as a namespace.
+    Wrap an agent CLI as a namespace.
   </Card>
   <Card title="Architecture" icon="sitemap" href="/reference/architecture">
-    How the dispatcher, runtime, and wire patterns fit together inside
-    the sandbox.
+    Dispatcher, runtime, wire patterns.
   </Card>
   <Card title="CLI reference" icon="terminal" href="/reference/cli">
-    Every `agentix <subcommand>` documented: `build`, `install`,
-    `deploy`, `check`.
+    `agentix build`, `deploy`, `check`.
   </Card>
   <Card title="Namespace protocol" icon="diagram-project" href="/reference/namespace-protocol">
-    The wire-format contract between caller and sandbox — useful when
-    porting the client to another language.
+    Wire-format contract.
   </Card>
 </CardGroup>

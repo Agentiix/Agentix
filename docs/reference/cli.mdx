@@ -1,12 +1,7 @@
 ---
 title: CLI reference
-description: Every agentix subcommand documented — build, install, deploy, check.
+description: Every agentix subcommand — build, deploy, check.
 ---
-
-The four built-in subcommands are hardcoded in
-`agentix/cli/__init__.py`. Third parties that want their own top-level
-verb should ship a `console_scripts` binary (`agentix-yourcmd`) rather
-than registering against the central dispatcher.
 
 ```bash
 agentix --help
@@ -14,9 +9,7 @@ agentix --help
 
 ## `agentix build`
 
-Build one namespace image, or bundle several into a single image. The
-verb is the same; passing one spec produces a single-namespace image,
-passing many produces a bundle.
+Build one namespace image, or bundle several into a single image.
 
 ```bash
 # One namespace — tag auto-derived from pyproject.toml
@@ -30,21 +23,16 @@ agentix build primitives/bash ./my-experimental-namespace -o demo:dev
 agentix build bash files --dry-run -o sandbox:dev
 ```
 
-Each spec accepts one of:
+Each spec accepts:
 
 - **Path:** `./primitives/bash` or any directory with a `pyproject.toml`.
 - **Short name:** looked up under the repo's `primitives/`.
-- **PyPI dist:** `agentix-bash` (currently surfaces NotImplementedError;
-  fetch path is stubbed).
+- **PyPI dist:** `agentix-bash` (currently raises `NotImplementedError`).
 
 `-o / --output / --tag` is the output image tag. With one spec it's
 optional (auto-derived as `agentix/<short>:<version>`). With multiple
 specs it's required. `--dry-run` stages the docker build context to
 `./build/<name>/` and prints the path instead of invoking docker.
-
-The runtime discovers every bundled namespace via
-`importlib.metadata.entry_points(group="agentix.namespace")` at startup —
-no bundle disposition file is needed.
 
 ## `agentix deploy`
 
@@ -57,38 +45,33 @@ agentix deploy local --image my-agent:0.1.0 --detach
 agentix deploy daytona --image docker.io/me/my-agent:0.1.0    # currently NotImplementedError
 ```
 
-`<backend>` is the name of any registered `agentix.deployment` plugin.
-The three built-in backends are `local`, `daytona`, and `e2b`; any
-`pip install agentix-deployment-*` package adds its own.
+`<backend>` is any registered `agentix.deployment` plugin. Built-ins:
+`local`, `daytona`, `e2b`.
 
-By default the command stays in the foreground: prints the sandbox's
-`runtime_url`, waits for Ctrl-C, then tears the sandbox down.
-`--detach` exits after `create()` and just prints the handle so the
-user can manage the sandbox lifetime themselves.
-
-- `--detach` — exit immediately after sandbox creation
+Foreground by default: prints `runtime_url`, waits for Ctrl-C, tears
+the sandbox down. `--detach` exits after `create()` and prints the
+handle.
 
 ## `agentix check`
 
-List installed namespaces and smoke-import each one.
+List installed namespaces and smoke-import each. Non-zero exit code
+if any fail.
 
 ```bash
 agentix check
 ```
 
-With the entry-point model, namespace stub-impl drift is impossible
-(one class, the methods are the implementation). `agentix check` is a
-fast health check: every namespace declared under `agentix.namespace`
-actually imports without error. Non-zero exit code if any failed.
+## Configuration
 
-## Configuration via environment
-
-Most plugin-specific config reads from environment variables, not
-command-line flags.
+Most config reads from environment variables.
 
 | Variable                          | Used by                    | Purpose                                |
 | --------------------------------- | -------------------------- | -------------------------------------- |
-| `AGENTIX_BIND_PORT`               | `start` / runtime server   | Bind port (default 8000)               |
+| `AGENTIX_BIND_PORT`               | runtime server             | Bind port (default 8000)               |
 | `AGENTIX_UPLOAD_ROOT`             | `agentix.files` namespace  | Sandbox-side root for file I/O         |
 | `DAYTONA_API_KEY`                 | `daytona` deployment       | API auth                               |
 | `E2B_API_KEY` / `E2B_TEMPLATE_ID` | `e2b` deployment           | API auth + template                    |
+
+Third parties that want their own top-level verb should ship a
+separate `console_scripts` binary (`agentix-yourcmd`) rather than
+registering against the central dispatcher.

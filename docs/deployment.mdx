@@ -5,16 +5,15 @@ description: Host-side backend that provisions sandboxes — pick one with `agen
 
 A **deployment** is a host-side backend that provisions sandboxes. The
 user picks one with `agentix deploy <name> --image …`; in code, you
-instantiate the class and pass it to `session(...)`. The framework
-ships three built-ins — `local` (Docker), `daytona`, `e2b` — and any
-`pip install agentix-deployment-*` package adds another.
+instantiate the class and pass it to `session(...)`. Built-ins:
+`local` (Docker), `daytona`, `e2b`. `pip install agentix-deployment-*`
+adds another.
 
 ## Using one
 
 <Tabs>
   <Tab title="CLI">
     ```bash
-    # Each named backend is just an entry-point under agentix.deployment.
     agentix deploy local --image my-agent:0.1.0
     agentix deploy fly   --image my-agent:0.1.0    # after `pip install agentix-deployment-fly`
     ```
@@ -34,14 +33,13 @@ ships three built-ins — `local` (Docker), `daytona`, `e2b` — and any
   </Tab>
 </Tabs>
 
-`session(deployment, config)` is a free function — composition over
-inheritance. It calls `create()` on entry and `delete()` on exit.
+`session(deployment, config)` creates the sandbox on entry and deletes
+it on exit.
 
 ## Writing one
 
-A deployment backend is a class that satisfies the three-method
-`Deployment` Protocol. **Structural type — no inheritance, no base
-class.**
+A deployment backend is a class that implements three methods. No
+inheritance — the framework uses structural typing.
 
 <Tabs>
   <Tab title="Plugin source">
@@ -53,7 +51,7 @@ class.**
 
     class FlyDeployment:
         def __init__(self) -> None:
-            # Backends take NO constructor arguments — read config from env.
+            # Backends take NO constructor args — read config from env.
             self._token = os.environ["FLY_API_TOKEN"]
 
         async def create(self, config: SandboxConfig) -> Sandbox: ...
@@ -73,27 +71,12 @@ class.**
   </Tab>
 </Tabs>
 
-After `pip install`, `agentix deploy fly --image my-agent:0.1.0` is
-live with no framework changes.
-
-`isinstance(FlyDeployment(), Deployment)` returns True on its own —
-the framework's runtime check is structural, so a backend can satisfy
-the interface without coupling to the framework class hierarchy.
-
-## How discovery works
-
-The CLI walks `importlib.metadata.entry_points(group="agentix.deployment")`
-when `agentix deploy <name>` runs and instantiates the matching class
-with **no constructor arguments**. Backends read API keys, regions,
-and other configuration from environment variables in `__init__`.
-
-Two distributions registering the same name raise `PluginConflictError`
-with both dist labels — the CLI accepts one `<name>` argument, so
-silent last-wins would hide a stale install.
+After `pip install`, `agentix deploy fly --image my-agent:0.1.0` works
+with no framework changes.
 
 ## Configuration
 
-Backend config is environment-variable based, by convention:
+Backend config reads from environment variables:
 
 | Variable                          | Used by              | Purpose                                  |
 | --------------------------------- | -------------------- | ---------------------------------------- |
@@ -101,13 +84,5 @@ Backend config is environment-variable based, by convention:
 | `E2B_API_KEY` / `E2B_TEMPLATE_ID` | `e2b`                | API auth + template                      |
 | `AGENTIX_BIND_PORT`               | runtime server       | Bind port (default 8000)                 |
 
-Read your backend's env vars in `__init__` and fail fast if any are
-missing — surfacing the error at CLI time is friendlier than waiting
-for the first `create()` to fail.
-
-## When you write one
-
-A new sandbox host — Fly, Modal, Kubernetes, a managed-sandbox vendor,
-a local-process backend for tests. Backends that talk to different
-APIs but share a Protocol are exactly the shape this axis was designed
-for.
+Read env vars in `__init__` and fail fast if any are missing — the
+error surfaces at CLI time instead of inside the first `create()`.

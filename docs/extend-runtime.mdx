@@ -1,19 +1,17 @@
 ---
 title: Extend the runtime
-description: Host-side hooks for tracing, wire patterns, spec resolvers, and the CLI — what's pluggable, what isn't, and how to extend each.
+description: Host-side hooks for tracing, wire patterns, spec resolvers, and the CLI.
 ---
 
 The two **plugin axes** ([Namespace](/namespace) and
-[Deployment](/deployment)) exist because they cross the host↔sandbox
-boundary. Everything else lives on the host as plain Python — you
-extend it by importing and calling, not by `pip install`. This guide
-walks each host-side hook.
+[Deployment](/deployment)) cross the host↔sandbox boundary, so they
+go through entry-point discovery. Everything else is host-side Python
+you import and call.
 
-## Trace pub/sub — fan-out observability
+## Trace pub/sub
 
 Every namespace's `agentix.trace.emit(kind, payload)` call fans out to
-every subscribed handler. Handlers attach once at runtime startup via
-an **installer** — a callable the framework invokes during lifespan:
+every subscribed handler. Attach handlers at runtime startup:
 
 ```python title="my_otel_handler/__init__.py"
 from opentelemetry import trace as otel
@@ -40,48 +38,33 @@ my_otel_handler.install()
 ```
 
 Handler errors are caught and logged — tracing never breaks a rollout.
-But handlers that **block** will slow tracing for the entire runtime;
-offload heavy work (network I/O, file flushes) to a background thread
-or async task inside the handler body.
+Blocking handlers slow the entire runtime; offload heavy work to a
+background task.
 
-<Tip>
-  **Why isn't this an entry-point axis?** Trace handlers run host-side,
-  not in the sandbox. Plugin discovery via `pip install` is for things
-  that cross the process boundary. A host-side hook is one function
-  call — `import` and `subscribe(my_handler)` is enough. No framework
-  dispatch needed.
-</Tip>
+## Call shapes
 
-## Call shapes — three built-ins, detected by signature
-
-Three call shapes are detected by `agentix.dispatch.detect_shape(fn)`
-from `inspect.isasyncgenfunction(fn)` plus a scan for `Channel[T]`
+Three shapes are detected by `agentix.dispatch.detect_shape(fn)` from
+`inspect.isasyncgenfunction(fn)` plus a scan for `Channel[T]`
 parameters:
 
-| Shape    | Signature                                                                       |
-| -------- | ------------------------------------------------------------------------------- |
-| `unary`  | `async def f(...) -> T`                                                         |
-| `stream` | `async def f(...) -> AsyncIterator[T]: yield ...`                               |
-| `bidi`   | same as stream + one `Channel[U]` parameter (caller-pushed input)               |
+| Shape    | Signature                                                              |
+| -------- | ---------------------------------------------------------------------- |
+| `unary`  | `async def f(...) -> T`                                                |
+| `stream` | `async def f(...) -> AsyncIterator[T]: yield ...`                      |
+| `bidi`   | same as stream + a `Channel[U]` parameter (caller-pushed input)        |
 
-`c.remote(fn, ...)` returns a tagged variant — `Unary[R]` (await),
-`Stream[R]` (async iterate), or `Bidi[I, R]` (async iterate + push to
-`.inbox`). Each variant implements its natural Python protocol so the
-common case is a one-liner; `match` on the variant when writing
-generic helpers that handle any shape.
+`c.remote(fn, ...)` returns `Unary[R]` (await), `Stream[R]`
+(async-for), or `Bidi[I, R]` (async-for + `.inbox.send(...)`).
 
-Detection runs at `Dispatcher.bind` time on the server and on every
-`c.remote(...)` on the client. If a fourth shape ever becomes
-necessary, edit `detect_shape` plus the matching branches in
-`Dispatcher.bind` and `RuntimeClient.remote` — no plugin hook.
+Adding a fourth shape means editing `agentix.dispatch.detect_shape`
+plus the matching branches in `Dispatcher.bind` and
+`RuntimeClient.remote`.
 
-## Spec resolvers — internal ordered list
+## Spec resolvers
 
-`agentix build <spec>` accepts four spec shapes today: a local path
-(`./primitives/bash`), a docker image ref
-(`docker.io/me/agent:1.0`), a short name resolved against the repo
-(`bash`), and a PyPI dist (`agentix-bash`). The resolution chain lives
-in `agentix/cli/_resolve.py`:
+`agentix build <spec>` accepts a local path, a docker image ref, a
+short name resolved against the repo, or a PyPI dist. The resolution
+chain lives in `agentix/cli/_resolve.py`:
 
 ```python
 RESOLVERS = [
@@ -93,33 +76,20 @@ RESOLVERS = [
 ```
 
 The CLI walks the list in priority order; the first resolver whose
-`resolve()` returns non-`None` wins. **Add a new spec shape by editing
-that file** — extending the CLI's input grammar is a framework concern,
-not a per-wheel one.
+`resolve()` returns non-`None` wins. Add a new spec shape by editing
+that file.
 
 ## A new `agentix <verb>` CLI
 
 The four built-in subcommands (`build`, `install`, `deploy`, `check`)
-are hardcoded in `agentix/cli/__init__.py`. The dispatcher is *not* a
-plugin surface. Third parties that want a new top-level verb should
-ship a separate `console_scripts` binary in their wheel:
+are hardcoded. Third parties ship a separate `console_scripts` binary:
 
 ```toml title="pyproject.toml"
 [project.scripts]
 agentix-yourcmd = "your_package:main"
 ```
 
-Users invoke it directly: `agentix-yourcmd …`. The convention is
-`agentix-<verb>` so it sorts alphabetically next to the framework
-verbs in shell completion.
-
-<Tip>
-  **Why not a plugin?** The CLI dispatcher is a thin argparse handler
-  with no per-subcommand state. Loading every wheel's subcommands at
-  every CLI invocation would slow down `agentix --help` and turn a
-  static argparse tree into a dynamic registry. A `console_scripts`
-  binary is the same UX with none of that cost.
-</Tip>
+Users invoke it directly: `agentix-yourcmd …`.
 
 ## Summary
 
@@ -129,7 +99,3 @@ verbs in shell completion.
 | Call shapes                    | `agentix.dispatch.detect_shape`    | `agentix/dispatch.py` (framework PR)         |
 | Spec resolvers                 | In-tree ordered list               | `agentix/cli/_resolve.py` (framework PR)     |
 | A new `agentix <verb>`         | Separate `console_scripts` binary  | Your own wheel — `agentix-<verb>` convention |
-
-If you find yourself wanting to ship a new wire pattern or spec
-resolver as a plugin, file an issue first — that's a framework-level
-design decision, not a wheel-level one.

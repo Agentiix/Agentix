@@ -1,22 +1,7 @@
 ---
 title: Architecture
-description: How entry-point discovery, in-process dispatch, and the runtime server fit together.
+description: How entry-point discovery, dispatch, and the runtime server fit together.
 ---
-
-## Scope
-
-v0.1.0 ships exactly three concerns:
-
-1. A **namespace convention** — what a Python distribution (and the
-   image that bundles it) must contain to be consumable by Agentix.
-2. A **runtime server** — one Python process per sandbox that loads
-   each installed namespace class on first call and exposes typed
-   remote dispatch + sandbox I/O.
-3. A **Docker deployment** — assembles sandboxes from a runtime image
-   plus one or more namespace images and starts the runtime.
-
-See [ROADMAP.md](https://github.com/Agentiix/Agentix/blob/master/ROADMAP.md)
-for what comes later.
 
 ## Components
 
@@ -30,7 +15,7 @@ for what comes later.
                                │ HTTP (POST /_remote)
 ┌─ Sandbox ────────────────────▼─────────────────────────────────┐
 │                                                                 │
-│  agentix-server (single Python process)                         │
+│  agentix-server (multiplexer process)                           │
 │    built-in I/O:                                                │
 │      GET  /health                                               │
 │      POST /exec     (SSE or JSON)                               │
@@ -41,110 +26,86 @@ for what comes later.
 │      POST /_remote   { package, method, args, kwargs }          │
 │      /socket.io/     streams, bidi, log fan-out                 │
 │                                                                 │
-│  Registry: package → class (in-process, no subprocesses)        │
-│    populated at startup from                                    │
-│    importlib.metadata.entry_points(group="agentix.namespace");  │
-│    ep.load() deferred to first /_remote call per namespace.     │
+│  Workers: one subprocess per namespace, spawned lazily on       │
+│  first dispatch using the namespace's venv interpreter.         │
 │                                                                 │
-│  /nix/store — only present if a namespace shipped default.nix;  │
-│  baked into the bundle image at build time                      │
+│  /nix/store — only present if a namespace shipped default.nix.  │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-The runtime walks `importlib.metadata.entry_points` at startup and
-registers each pending entry; first dispatch triggers the actual import.
-Namespaces are fixed for the sandbox's lifetime — change the set by
-rebuilding the bundle image and recreating the sandbox.
+The runtime walks `importlib.metadata.entry_points(group="agentix.namespace")`
+at startup. First dispatch triggers worker spawn for the target
+namespace. Namespaces are fixed for the sandbox's lifetime — change
+the set by rebuilding the bundle and recreating the sandbox.
 
 ## Namespace convention
-
-A namespace is a Python distribution that contributes a class under
-`agentix.<short>` and declares one entry point under `agentix.namespace`.
-Layout:
 
 ```text
 my-namespace/
 ├── pyproject.toml            # name = "agentix-<short>", entry-point block
 ├── src/agentix/<short>/      # PEP 420 namespace package
-│   └── __init__.py           # class <Name>(Namespace) with @staticmethod methods
-└── default.nix               # OPTIONAL — only when the namespace needs
-                              #   system deps (claude CLI, git, libffi, …)
+│   └── __init__.py           # public async functions
+└── default.nix               # OPTIONAL — system deps only
 ```
 
-Routing is by Python module path. After bundling, `from agentix.<short> import Cls`
-on the caller side and `c.remote(Cls.method, ...)` is all the contract.
-Two distributions registering the same entry-point name raise
-`PluginConflictError` on first lookup.
+Routing is by Python module path: `c.remote(bash.run, ...)` reads
+`bash.run.__module__` as the routing key. Two distributions
+registering the same entry-point name raise `PluginConflictError`.
 
-See [Namespace protocol](/reference/namespace-protocol) for the full ABI.
+See [Namespace protocol](/reference/namespace-protocol) for the full
+ABI.
 
 ## Build pipeline
 
-`agentix build <specs...> -o <tag>` produces a single deploy-ready
-bundle image:
+`agentix build <specs...> -o <tag>` produces one deploy-ready bundle:
 
-1. **Stage 1 (optional Nix):** if any spec ships `default.nix`, a
-   `nixos/nix` builder stage runs first. Each spec's derivation is
-   built; the full closure is copied to `/export/nix/store`. Bundles
-   with no system deps anywhere skip this stage entirely.
-2. **Stage 2 (per-namespace venvs):** `FROM agentix/runtime:<version>`
-   (which is Python 3.11-slim + framework venv at `/nix/runtime/` +
-   uv + the framework wheel stashed at `/nix/.wheels/`). If stage 1
-   ran, `COPY --from=sys-builder /export/nix/store /nix/store`. Then
-   **for each spec** create its own venv via `uv venv /nix/<short>/`
-   and pip-install the namespace + the framework wheel into it. For
-   specs with `default.nix`, also symlink the derivation's `bin/*`
-   into `/nix/<short>/bin/`.
-3. **Output:** one image carrying the framework + one venv per
-   namespace + any system deps. The sandbox runs it directly.
+1. **Optional Nix stage:** if any spec ships `default.nix`, a
+   `nixos/nix` builder stage runs first; the closure is copied to
+   `/export/nix/store`. Bundles with no system deps skip this stage.
+2. **Per-namespace venvs:** `FROM agentix/runtime:<version>` (Python
+   3.11-slim + framework venv at `/nix/runtime/` + uv). For each spec
+   create `uv venv /nix/<short>/` and pip-install the namespace + the
+   framework wheel. Specs with `default.nix` get their derivation's
+   `bin/*` symlinked into `/nix/<short>/bin/`.
 
 The runtime image (`agentix/runtime:<version>`) is built once via
-`docker build -f primitives/_template/Dockerfile .` from the repo root.
+`docker build -f primitives/_template/Dockerfile .`.
 
 ## Sandbox layout
 
 ```text
 /                                  ← bundle image rootfs
-├── venvs/
+├── nix/
 │   ├── runtime/                   ← framework venv; ENTRYPOINT here
 │   │   ├── bin/agentix-server     ← the multiplexer process
 │   │   └── lib/python3.11/site-packages/agentix/...
 │   ├── bash/                      ← one venv per namespace
 │   │   ├── bin/python             ← worker interpreter for agentix.bash
 │   │   └── lib/python3.11/site-packages/agentix/bash/...
-│   └── files/
-│       ├── bin/python
-│       └── lib/python3.11/site-packages/agentix/files/...
-├── agentix-wheel/                 ← framework wheel; reused at build time
-└── nix/                           ← optional, only if a namespace had
-    └── store/                       default.nix
-        ├── <hash>-claude-*/bin/claude
-        └── <hash>-git-*/bin/git
+│   ├── .wheels/                   ← framework wheel; reused at build
+│   └── store/                     ← only if a namespace had default.nix
+│       ├── <hash>-claude-*/bin/claude
+│       └── <hash>-git-*/bin/git
 ```
 
-The sandbox container's `ENTRYPOINT` is `/nix/runtime/bin/agentix-server`.
-It binds to `AGENTIX_BIND_PORT` and starts the multiplexer; namespace
-workers spawn lazily on first dispatch using each namespace's
-`/nix/<short>/bin/python`.
+ENTRYPOINT is `/nix/runtime/bin/agentix-server`, binding
+`AGENTIX_BIND_PORT`. Namespace workers spawn lazily using each
+namespace's `/nix/<short>/bin/python`.
 
 ## Environment & PATH policy
 
-Rules at every `Bash.run` invocation:
+Subprocess invocations:
 
 1. **Strip Nix-host-only env vars** — `LD_LIBRARY_PATH`, `LD_PRELOAD`,
    `PYTHONPATH`, `PYTHONHOME`, `LOCALE_ARCHIVE`, `FONTCONFIG_*`,
    `SSL_CERT_FILE`, anything prefixed `NIX_`.
-2. **PATH defaults to** `/usr/local/bin:/usr/bin:/bin`.
-3. **Namespace native tools** ship at content-addressed
-   `/nix/store/<hash>/bin/<tool>` paths and are invoked by their
-   absolute path from Python impls.
-4. **Namespace Python impls run in the runtime's interpreter** —
-   they invoke native tools via `subprocess` with `/nix/store` paths,
-   which resolve directly since the store is baked into the image.
+2. **PATH defaults to** `/usr/local/bin:/usr/bin:/bin`. Namespace
+   bin/ dirs (e.g. `/nix/claude_code/bin/`) are prepended when that
+   namespace's worker runs subprocesses.
+3. **Nix-store paths** (`/nix/store/<hash>/bin/<tool>`) are stable
+   across the bundle's lifetime — content-addressed.
 
 ## Deployment (Docker)
-
-Sandbox create reduces to one `docker run`:
 
 ```bash
 docker run -d \
@@ -155,34 +116,5 @@ docker run -d \
 ```
 
 The deployment picks a free host port, passes it via env, and
-health-checks `/health` on it before returning. No volume-populate
-dance, no mount-and-merge, no custom entrypoint — the bundle image
-carries everything.
-
-## Design decisions
-
-- **Subprocess per namespace.** Each namespace runs in its own venv's
-  Python interpreter, isolated from every other namespace's deps. The
-  runtime process is the multiplexer — it spawns workers lazily,
-  forwards RPC frames over stdin/stdout, and routes trace events back
-  to the Socket.IO channel.
-- **Entry-point discovery across venvs** — the multiplexer walks
-  `/nix/<short>/lib/python*/site-packages` for `agentix.namespace` entry
-  points. No `manifest.json`, no per-framework decorator.
-- **The class is the API spec** — `@staticmethod` methods on a
-  `Namespace` subclass carry both the type signature and the real
-  implementation. The host imports the class for typing; the body
-  runs inside the worker subprocess.
-- **Static namespace set per sandbox** — change the set by rebuilding
-  the bundle and recreating the sandbox.
-- **Built-in sandbox I/O on the runtime** — run / upload / download
-  always available, independent of any namespace.
-- **Nix is opt-in.** Pure-Python namespaces ship no `default.nix` and
-  the build skips Nix entirely — `FROM python:slim` end-to-end, seconds
-  to build instead of minutes.
-
-## Out of scope (v0.1.0)
-
-- Bearer-token auth on the runtime (sandbox-level trust assumed).
-- Higher-level interfaces for agents / datasets / benchmarks — see
-  [ROADMAP.md](https://github.com/Agentiix/Agentix/blob/master/ROADMAP.md).
+health-checks `/health` before returning. The bundle image carries
+everything — no volume populate, no mount-and-merge.

@@ -5,23 +5,18 @@ description: A Python package whose top-level async functions are remote-callabl
 
 A **namespace** is a Python package (`agentix.<short>`) whose top-level
 async functions are remote-callable. Callers invoke them via
-`c.remote(bash.run, command="ls")`; the runtime reads
-`bash.run.__module__` as the routing key, spawns a worker subprocess
-for that package on first call (using the namespace's own venv), and
-runs the real method body inside the sandbox.
+`c.remote(bash.run, command="ls")`; the runtime spawns a worker
+subprocess for the package on first call and runs the method body
+inside the sandbox.
 
 ## Writing one
 
-A namespace is a normal Python project (whatever `uv init --lib`
-produces) plus one entry-point block pointing at the package.
+A namespace is a normal Python project plus one entry-point block.
 
 <Tabs>
   <Tab title="Plugin source">
     ```python title="src/agentix/myagent/__init__.py"
-    """Optional module docstring — surfaces in /namespaces output."""
-
     async def run(instruction: str) -> str:
-        # real implementation — runs inside the sandbox
         return f"did: {instruction}"
     ```
   </Tab>
@@ -46,15 +41,15 @@ produces) plus one entry-point block pointing at the package.
     └── src/
         └── agentix/              # PEP 420 namespace package, no __init__.py
             └── myagent/
-                └── __init__.py   # async def run(...), helper types, …
+                └── __init__.py   # async def run(...), helpers, types
     ```
   </Tab>
 </Tabs>
 
-The package can contain anything — dataclasses, constants, type
-aliases, sync helpers. The framework's discovery only picks **public
-async functions** (`async def` / `async def ... yield`) as remote
-methods; everything else is regular Python that callers import
+The package can hold dataclasses, constants, type aliases, sync
+helpers — anything you want. The framework's discovery picks only
+**public async functions** (`async def` / `async def ... yield`) as
+remote methods; everything else is regular Python that callers import
 normally.
 
 `primitives/bash` and `primitives/files` are working in-tree examples.
@@ -63,47 +58,14 @@ normally.
 
 ```python
 from agentix import RuntimeClient, bash
-from agentix.bash import BashResult       # type for return-annotation
+from agentix.bash import BashResult
 
 async with RuntimeClient(sandbox.runtime_url) as c:
     result: BashResult = await c.remote(bash.run, command="echo hi")
     print(result.stdout)        # → "hi\n"
 ```
 
-`pip install agentix-bash` is everything the caller needs. The runtime
-discovers the entry point on startup, defers worker spawn until the
-first dispatch for the namespace, and reuses the same worker for the
-rest of the sandbox's life.
-
-<Tip>
-  **Why no base class?** `agentix.namespace.discover_methods` is
-  duck-typed — anything with public async attributes is a valid
-  namespace target. The package's identity is its entry-point
-  declaration; no `Namespace` import, no `@staticmethod` decorators,
-  no class wrapper required. Class-style targets (legacy
-  `module:Class` entry-point value) still work via the same discovery
-  pass.
-</Tip>
-
-## How discovery works
-
-The runtime walks
-`importlib.metadata.entry_points(group="agentix.namespace")` at startup
-and records each `(name, module_path)` pair. **Nothing is imported
-yet.** The first `POST /_remote` for a given namespace spawns
-`python -m agentix.runtime.worker --target <module_path>` using that
-namespace's venv interpreter; the worker imports the package, binds
-its public async functions via `Dispatcher`, and reports `ready`. The
-multiplexer reuses that worker for every subsequent call.
-
-Boot errors surface on the first call to a broken namespace; siblings
-are unaffected. There is no on-disk manifest the runtime inspects —
-the wheel's installed metadata is the entire discovery contract.
-
-`agentix check` walks every installed namespace and confirms each has
-at least one discoverable async method. Two distributions registering
-the same entry-point name collide loudly with `PluginConflictError` —
-silent last-wins would hide a stale install.
+`pip install agentix-bash` is everything the caller needs.
 
 ## Streaming methods
 
@@ -118,7 +80,7 @@ async def chat(prompt: str) -> AsyncIterator[str]:
         yield line.decode()
 ```
 
-The caller iterates directly — **no `await` on the call site**:
+Caller iterates directly — **no `await` on the call site**:
 
 ```python
 from agentix import chatbot
@@ -126,13 +88,5 @@ async for token in c.remote(chatbot.chat, prompt="…"):
     print(token, end="")
 ```
 
-Items flow over Socket.IO `stream:item` events. See the
-[Namespace protocol](/reference/namespace-protocol) for the full wire
-contract, including bidi and the runtime built-ins (`/exec`,
-`/upload`, `/download`).
-
-## When you write one
-
-Anything you want the trainer or harness to call inside the sandbox —
-a tool, a dataset adapter, a model wrapper, a benchmark scorer, a
-primitive (shell, files, browser).
+See the [Namespace protocol](/reference/namespace-protocol) for the
+full wire contract including bidi and runtime built-ins.
