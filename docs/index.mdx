@@ -1,40 +1,30 @@
 ---
 title: Agentix
-description: A sandbox framework for agentic RL training and evaluation.
+description: The execution, tracing, and integration bridge between agents and your LLM stack.
 ---
 
-**Agentix** is a sandbox framework for agentic RL training and evaluation,
-providing three core capabilities:
+**Agentix** is the **execution, tracing, and integration bridge**
+between agents and your LLM serving, RL post-training, and evaluation
+infrastructure. Whether your agent is a CLI binary
+(Claude Code, Codex), a Python framework
+([mini-swe-agent](https://github.com/SWE-agent/mini-swe-agent),
+[swe-agent](https://github.com/SWE-agent/SWE-agent),
+[OpenHands](https://github.com/All-Hands-AI/OpenHands)), or something
+you wrote yourself, Agentix hosts it inside an isolated rollout
+container, captures every LLM call and tool invocation as a
+structured trace, and routes those traces to
+[slime](https://github.com/THUDM/slime), custom serving providers,
+or benchmark scorers.
 
-1. **Sandboxed agent execution** — every rollout runs inside an isolated
-   container. Built-in backends: `local` (Docker), `daytona`, `e2b`.
-2. **Pip-installable agent / dataset / tool extensions** — each extension
-   is a standalone Python wheel with one entry-point block; the
-   framework discovers it via `importlib.metadata` (no YAML, no
-   decorator, no per-framework registry call).
-3. **Typed remote dispatch** — compose namespaces in your trainer with
-   `c.remote(fn, ...)`; Pyright infers return types end-to-end.
+Each agent, dataset, or tool is a regular Python project. Call them
+from your trainer or evaluator with typed remote dispatch —
+`c.remote(fn, ...)` reads `fn`'s signature, so Pyright infers every
+return type end-to-end.
 
-## Out-of-the-box integrations
+## Quickstart
 
-Agentix ships **bash** and **files** as in-tree primitives. The
-[agentix-cookbook](https://github.com/Agentiix/agentix-cookbook)
-repository provides:
-
-- **Claude Code** (`agentix-claude-code`) — the Anthropic CLI wrapped
-  as a typed namespace, with a Nix-pinned binary and per-call API key
-  passthrough.
-- **SWE-bench Verified** (`agentix-swebench`) — `score(instance, patch)`
-  using the official [`swebench`](https://github.com/swe-bench/SWE-bench)
-  package for per-repo test specs, log parsers, and grading.
-
-[agentix-llm-proxy](https://github.com/Agentiix/agentix-llm-proxy)
-intercepts LLM API calls from any agent CLI and fans the traces to:
-
-- [**slime**](https://github.com/THUDM/slime) — for on-policy RL
-  post-training; traces stream into slime's data buffer.
-
-## End-to-end example
+A SWE-bench Verified rollout — clone the repo, run Claude Code, score
+the patch — composed from three integrations:
 
 ```python
 from datasets import load_dataset
@@ -62,17 +52,72 @@ async with RuntimeClient(sandbox.runtime_url) as c:
     s = await c.remote(swebench.score, instance=inst, patch=diff.stdout)
 ```
 
-A SWE-bench Verified rollout, composed from three pip-installed
-namespaces.
+## Key Features
+
+- **Run any agent in an isolated rollout container** — a CLI binary
+  (Claude Code, Codex), a Python framework (mini-swe-agent,
+  swe-agent, OpenHands), or your own. Built-in recipe:
+  [Claude Code](https://github.com/Agentiix/agentix-cookbook/tree/main/claude-code).
+- **Score against any benchmark.** Built-in:
+  [SWE-bench Verified](https://github.com/Agentiix/agentix-cookbook/tree/main/swebench),
+  wrapping the official
+  [`swebench`](https://github.com/swe-bench/SWE-bench) harness's test
+  specs, log parsers, and grading.
+- **Bridge to RL training and serving.** Every LLM call and tool
+  invocation streams out as a structured trace via
+  [agentix-llm-proxy](https://github.com/Agentiix/agentix-llm-proxy).
+  Destinations: [slime](https://github.com/THUDM/slime) (RL data
+  buffer), custom LLM providers (serving and evaluation).
+- **Pluggable execution backends.** `local` (Docker), `daytona`, and
+  `e2b` built in; Fly, Modal, Kubernetes via
+  `pip install agentix-deployment-<name>`.
+- **Typed remote dispatch.** Call container methods like local
+  functions. Three call shapes (unary / server-streaming /
+  bidirectional) are auto-detected from your function signature.
+- **Trace fan-out.** `agentix.trace.subscribe(fn)` ships every
+  integration's `trace.emit(...)` events into OpenTelemetry, Sentry,
+  or your own bus.
+
+## Supported Integrations
+
+### Agents
+
+- **Claude Code** — [recipe](https://github.com/Agentiix/agentix-cookbook/tree/main/claude-code)
+- **mini-swe-agent / swe-agent / OpenHands / Codex / Aider / your own** —
+  wrap with the [agent integration guide](/integrate-agent);
+  contributions welcome.
+
+### Benchmarks
+
+- **SWE-bench Verified** — [recipe](https://github.com/Agentiix/agentix-cookbook/tree/main/swebench),
+  built on the official
+  [`swebench`](https://github.com/swe-bench/SWE-bench) package
+
+### In-tree Primitives
+
+- **bash** — shell execution inside the rollout container
+- **files** — upload, download, and edit files in the rollout container
+
+### Execution Backends
+
+- `local` (Docker), `daytona`, `e2b` — built in
+- Third-party — `pip install agentix-deployment-<name>`
+
+### RL Frameworks / Serving Providers
+
+- [**slime**](https://github.com/THUDM/slime) — RL post-training
+- **Custom LLM providers** — serving and evaluation
+
+Both via [agentix-llm-proxy](https://github.com/Agentiix/agentix-llm-proxy).
 
 ## Read next
 
 <CardGroup cols={2}>
   <Card title="Quick start" icon="rocket" href="/quickstart">
-    Install, deploy a sandbox, call a namespace.
+    Install, deploy a rollout container, call an integration.
   </Card>
   <Card title="Cookbook" icon="book" href="https://github.com/Agentiix/agentix-cookbook">
-    Working recipes — Claude Code + SWE-bench scorer, end-to-end.
+    Working integrations — Claude Code + SWE-bench scorer.
   </Card>
   <Card title="Architecture" icon="sitemap" href="/reference/architecture">
     Runtime server, namespace workers, deployment backends.

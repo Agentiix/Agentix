@@ -1,3 +1,5 @@
+<div align="center">
+
 # Agentix
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -5,53 +7,34 @@
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![Docs](https://img.shields.io/badge/docs-agentiix.github.io-blue)](https://agentiix.github.io/)
 
-**Agentix** is a sandbox framework for agentic RL training and evaluation,
-providing three core capabilities:
+[Documentation](https://agentiix.github.io/) | [Supported Integrations](#supported-integrations) | [Cookbook](https://github.com/Agentiix/agentix-cookbook) | [LLM Proxy](https://github.com/Agentiix/agentix-llm-proxy) | [Contributing](docs/development.mdx)
 
-1. **Sandboxed agent execution**: Each rollout runs inside an isolated
-   container. Built-in backends: `local` (Docker), `daytona`, `e2b`.
-   Adding another is `pip install agentix-deployment-<name>`.
-2. **Pip-installable agent / dataset / tool extensions**: Each
-   extension is a standalone Python wheel with one entry-point block.
-   The framework discovers it via `importlib.metadata` — no YAML,
-   no decorator, no per-framework registry call.
-3. **Typed remote dispatch**: Compose namespaces in your trainer or
-   evaluator with `c.remote(fn, ...)`; Pyright infers return types
-   end-to-end from `fn`'s signature.
+</div>
 
-Agentix ships **bash** and **files** as in-tree primitives. The
-[agentix-cookbook](https://github.com/Agentiix/agentix-cookbook)
-repository provides working recipes for:
+## Overview
 
-- **Claude Code** — `pip install agentix-claude-code` wraps the
-  Anthropic CLI as a typed namespace.
-- **SWE-bench Verified** — `pip install agentix-swebench` wraps the
-  official [`swebench`](https://github.com/swe-bench/SWE-bench) package
-  (test specs, log parsers, `get_eval_report`) and exposes
-  `score(instance, patch)` as a single remote call.
+**Agentix** is the **execution, tracing, and integration bridge**
+between agents and your LLM serving, RL post-training, and evaluation
+infrastructure. Whether your agent is a CLI binary
+(Claude Code, Codex), a Python framework
+([mini-swe-agent](https://github.com/SWE-agent/mini-swe-agent),
+[swe-agent](https://github.com/SWE-agent/SWE-agent),
+[OpenHands](https://github.com/All-Hands-AI/OpenHands)), or something
+you wrote yourself, Agentix hosts it inside an isolated rollout
+container, captures every LLM call and tool invocation as a
+structured trace, and routes those traces to
+[slime](https://github.com/THUDM/slime), custom serving providers,
+or benchmark scorers.
 
-Agentix integrates with the following RL post-training frameworks via
-[agentix-llm-proxy](https://github.com/Agentiix/agentix-llm-proxy)
-(the LLM-call interception layer that emits Agentix trace events
-from any agent CLI):
+Each agent, dataset, or tool is a regular Python project. Call them
+from your trainer or evaluator with typed remote dispatch —
+`c.remote(fn, ...)` reads `fn`'s signature, so Pyright infers every
+return type end-to-end.
 
-- [**slime**](https://github.com/THUDM/slime) — traces fan into
-  slime's data buffer for on-policy rollouts.
-
-## Table of Contents
-
-- [End-to-end example](#end-to-end-example)
-- [Architecture](#architecture)
-- [Install](#install)
-- [CLI](#cli)
-- [Write a namespace](#write-a-namespace)
-- [Two plugin axes](#two-plugin-axes)
-- [Links](#links)
-
-## End-to-end example
+## Quickstart
 
 A SWE-bench Verified rollout — clone the repo, run Claude Code, score
-the patch — composed from three pip-installed namespaces:
+the patch — composed from three integrations:
 
 ```python
 from datasets import load_dataset
@@ -79,31 +62,94 @@ async with RuntimeClient(sandbox.runtime_url) as c:
     s = await c.remote(swebench.score, instance=inst, patch=diff.stdout)
 ```
 
+## Key Features
+
+- **Run any agent in an isolated rollout container** — a CLI binary
+  (Claude Code, Codex), a Python framework (mini-swe-agent,
+  swe-agent, OpenHands), or your own. Each integration runs with its
+  own dependencies. Built-in recipe:
+  [Claude Code](https://github.com/Agentiix/agentix-cookbook/tree/main/claude-code).
+- **Score against any benchmark.** Built-in:
+  [SWE-bench Verified](https://github.com/Agentiix/agentix-cookbook/tree/main/swebench),
+  wrapping the official
+  [`swebench`](https://github.com/swe-bench/SWE-bench) harness's test
+  specs, log parsers, and grading.
+- **Bridge to RL training and serving.** Every LLM call and tool
+  invocation streams out as a structured trace via
+  [agentix-llm-proxy](https://github.com/Agentiix/agentix-llm-proxy).
+  Destinations: [slime](https://github.com/THUDM/slime) (RL data
+  buffer), custom LLM providers (serving and evaluation).
+- **Pluggable execution backends.** `local` (Docker), `daytona`, and
+  `e2b` built in; Fly, Modal, Kubernetes via
+  `pip install agentix-deployment-<name>`.
+- **Typed remote dispatch.** Call container methods like local
+  functions. Three call shapes (unary / server-streaming /
+  bidirectional) are auto-detected from your function signature.
+- **Trace fan-out.** `agentix.trace.subscribe(fn)` ships every
+  integration's `trace.emit(...)` events into OpenTelemetry, Sentry,
+  or your own bus — no per-integration wiring.
+
+## Supported Integrations
+
+### Agents
+
+- **Claude Code** — [recipe](https://github.com/Agentiix/agentix-cookbook/tree/main/claude-code)
+- **mini-swe-agent / swe-agent / OpenHands / Codex / Aider / your own** —
+  wrap with the [agent integration guide](https://agentiix.github.io/integrate-agent);
+  contributions welcome.
+
+### Benchmarks
+
+- **SWE-bench Verified** — [recipe](https://github.com/Agentiix/agentix-cookbook/tree/main/swebench),
+  built on the official
+  [`swebench`](https://github.com/swe-bench/SWE-bench) package's
+  `make_test_spec` + `get_eval_report`
+
+### In-tree Primitives
+
+- **bash** — [`primitives/bash`](primitives/bash); shell execution
+  inside the rollout container.
+- **files** — [`primitives/files`](primitives/files); upload,
+  download, and edit files in the rollout container.
+
+### Execution Backends
+
+- `local` — built-in, Docker-based
+- `daytona` — built-in
+- `e2b` — built-in
+- Third-party — `pip install agentix-deployment-<name>`
+
+### RL Frameworks / Serving Providers
+
+- [**slime**](https://github.com/THUDM/slime) — RL post-training;
+  traces flow into its data buffer via
+  [agentix-llm-proxy](https://github.com/Agentiix/agentix-llm-proxy).
+- **Custom LLM providers** — serving and evaluation via
+  [agentix-llm-proxy](https://github.com/Agentiix/agentix-llm-proxy).
+
 ## Architecture
 
 ```
-Orchestrator ──HTTP /_remote──► Runtime Server ──fork──► Namespace worker (per ns)
+Orchestrator ──HTTP /_remote──► Runtime Server ──fork──► Namespace worker (per integration)
    (trainer)                       (multiplexer)            (own venv, own PATH)
                                         ▲
             Socket.IO /socket.io/ ◄──────┴──── streams, bidi, logs, traces
 ```
 
-**Components:**
-
-- **Runtime server**: one process per sandbox. Routes `POST /_remote`
-  (unary) and Socket.IO events (streams / bidi / logs / traces) to
-  per-namespace workers spawned lazily on first dispatch.
-- **Namespace worker**: subprocess that imports the namespace package
-  using its own venv interpreter. PATH is prepended with
-  `/nix/<short>/bin/` so user code calls `subprocess.run("git", ...)`
-  without absolute paths.
+- **Runtime server**: one process per rollout container. Routes
+  `POST /_remote` (unary) and Socket.IO events (streams / bidi / logs
+  / traces) to per-integration workers spawned lazily on first
+  dispatch.
+- **Namespace worker**: subprocess that imports the integration using
+  its own venv. Each integration's dependencies stay isolated from
+  every other's — mix Aider 0.50 and OpenHands 0.20 in one container
+  without resolving deps across them.
 - **Deployment**: host-side backend (`local`, `daytona`, `e2b`, or a
-  third-party `agentix-deployment-*` wheel) that creates the sandbox
-  container and returns its `runtime_url`.
+  third-party plugin) that creates the rollout container and returns
+  its `runtime_url`.
 
-Discovery is via `importlib.metadata.entry_points`, lazy at first
-call. A broken namespace fails its own calls but never blocks
-sandbox boot.
+Discovery is lazy — a broken integration fails its own calls but
+never blocks boot.
 
 ## Install
 
@@ -111,7 +157,7 @@ sandbox boot.
 pip install agentix agentix-bash agentix-files
 ```
 
-Cookbook recipes (Claude Code + SWE-bench scorer):
+Cookbook integrations:
 
 ```bash
 git clone https://github.com/Agentiix/agentix-cookbook
@@ -129,13 +175,13 @@ pip install -e primitives/bash -e primitives/files
 ## CLI
 
 ```bash
-agentix build primitives/bash                              # one namespace image
+agentix build primitives/bash                              # one integration image
 agentix build bash files claude-code -o my-agent:0.1.0     # bundle several
-agentix deploy local --image my-agent:0.1.0                # run a sandbox
-agentix check                                              # smoke-import every installed namespace
+agentix deploy local --image my-agent:0.1.0                # run a rollout container
+agentix check                                              # smoke-test every installed integration
 ```
 
-## Write a namespace
+## Write an integration
 
 ```python
 # src/agentix/myagent/__init__.py
@@ -156,31 +202,27 @@ myagent = "agentix.myagent"
 packages = ["src/agentix"]
 ```
 
-`pip install agentix-myagent` is the entire setup. Caller-side:
+After `pip install agentix-myagent`:
 
 ```python
 from agentix import myagent
 result = await c.remote(myagent.run, instruction="...")
 ```
 
-Three call shapes are auto-detected from your function signature:
-`async def → T` is unary, `yield T` is server-streaming Socket.IO,
-adding a `Channel[U]` parameter is bidi.
+## Two extension axes
 
-## Two plugin axes
-
-Only things that cross the host↔sandbox boundary go through
-entry-point discovery:
+Only things that cross the host↔container boundary need framework-level
+discovery:
 
 | Axis | Entry-point group | What it ships | Built-ins |
 |---|---|---|---|
-| Namespaces | `agentix.namespace` | code that runs **inside the sandbox** | (third-party only) |
-| Deployments | `agentix.deployment` | backend that **provisions** the sandbox | `local`, `daytona`, `e2b` |
+| Namespaces | `agentix.namespace` | code that runs **inside the rollout container** | (third-party only) |
+| Deployments | `agentix.deployment` | backend that **provisions** the container | `local`, `daytona`, `e2b` |
 
 Host-side hooks (trace pub/sub, spec resolvers, CLI verbs) are plain
-Python — `import` and call. `agentix.trace.subscribe(fn)` is the
-single line that ships every namespace's `trace.emit(...)` events
-into OpenTelemetry, Sentry, or your own bus.
+Python — `agentix.trace.subscribe(fn)` is the single line that ships
+every integration's `trace.emit(...)` events into OpenTelemetry,
+Sentry, or your own bus.
 
 ## Links
 
