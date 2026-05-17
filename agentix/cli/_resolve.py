@@ -1,62 +1,48 @@
-"""Spec resolution — internal helper for `agentix build`.
+"""Read a project's pyproject.toml and derive build metadata.
 
-A *spec* is whatever the user types on the command line: a short name
-(`runtime-basic`), a relative path (`./Agentix-Runtime-Basic`), or an
-image reference (`docker.io/me/agent:0.1.0`). `resolve_spec` walks a
-hardcoded list of built-in resolvers in priority order and returns the
-first non-`None` answer.
+`agentix build` takes one project root — a directory containing
+`pyproject.toml`. Plugins (other `agentix-*` packages) are pulled in
+transitively via pip from the user's declared `[project].dependencies`;
+neither the CLI nor the user enumerates them on the command line.
 
-This is **not** a plugin axis. The three resolvers below cover every
-spec shape the CLI accepts; a new shape means editing this file, not
-shipping a wheel.
+This module owns the small bit of metadata extraction the build needs:
+  * `read_pyproject(path)` — parse the project's pyproject.toml.
+  * `short_name(pyproject)` — display/tag short name. Prefers the first
+    `[project.entry-points."agentix.namespace"]` key (plugins) and falls
+    back to the dist name (user projects).
+  * `derive_tag(pyproject)` — `<short>:<version>` from name+version.
+
+There's no multi-spec resolver, no PyPI fallback, no path-vs-image
+disambiguation. The spec is always a local project root.
 """
 
 from __future__ import annotations
 
 import tomllib
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
-@dataclass
-class NamespaceSpec:
-    """One resolved input to a build / install. Exactly one source field is set."""
-
-    short: str
-    kind: Literal["path", "pypi", "image"]
-    path: Path | None = None
-    pypi_dist: str | None = None
-    image_ref: str | None = None
-
-
-def read_pyproject(namespace_dir: Path) -> dict:
-    pp = namespace_dir / "pyproject.toml"
+def read_pyproject(project_dir: Path) -> dict:
+    pp = project_dir / "pyproject.toml"
     if not pp.is_file():
-        raise SystemExit(f"{namespace_dir}: missing pyproject.toml")
+        raise SystemExit(f"{project_dir}: missing pyproject.toml")
     with pp.open("rb") as f:
         return tomllib.load(f)
 
 
-# ── Built-in resolvers ──────────────────────────────────────────────
-
-
-def _short_from_pyproject(pyproject: dict) -> str:
-    """Derive the build-time short name for a pyproject.
+def short_name(pyproject: dict) -> str:
+    """Derive a short display/tag name for the project.
 
     Priority:
       1. First key in `[project.entry-points."agentix.namespace"]` —
-         the plugin's own self-declared short name. This is the canonical
-         source for plugin builds.
+         a plugin's self-declared short name.
       2. `[project].name` with an optional `agentix-` prefix stripped.
-         For user projects that don't declare a namespace entry point at
-         all, this is what gets used (e.g. `my-rl-experiment` → `my-rl-experiment`).
 
-    The short name only affects the image tag and the bundle layout —
-    routing on the wire is by `fn.__module__`, which is determined by
-    the user's actual Python import path.
+    The short name only affects the image tag and a few build
+    diagnostics — wire routing is by `fn.__module__`, which is
+    determined by the user's actual Python import path.
     """
     project = pyproject.get("project", {})
     ep_group = project.get("entry-points", {}).get("agentix.namespace", {})
@@ -71,56 +57,13 @@ def _short_from_pyproject(pyproject: dict) -> str:
     return name.removeprefix("agentix-")
 
 
-def _short_from_image(ref: str) -> str:
-    """`docker.io/me/agentix/bash:0.1.0` → `bash`."""
-    last = ref.rsplit("/", 1)[-1].rsplit(":", 1)[0]
-    return last[len("agentix-"):] if last.startswith("agentix-") else last
+def derive_tag(pyproject: dict) -> str:
+    """`<short>:<version>` from the pyproject."""
+    project = pyproject.get("project", {})
+    version = project.get("version")
+    if not isinstance(version, str):
+        raise SystemExit("pyproject.toml: [project].version is required")
+    return f"{short_name(pyproject)}:{version}"
 
 
-def _resolve_path(spec: str) -> NamespaceSpec | None:
-    """Treat explicit-path strings and existing source dirs as namespace sources."""
-    if spec.startswith((".", "/")):
-        p = Path(spec).resolve()
-        if not (p / "pyproject.toml").is_file():
-            raise SystemExit(f"{spec}: no pyproject.toml — not a namespace source dir")
-        return NamespaceSpec(short=_short_from_pyproject(read_pyproject(p)), kind="path", path=p)
-    p = Path(spec)
-    if p.is_dir() and (p / "pyproject.toml").is_file():
-        return NamespaceSpec(
-            short=_short_from_pyproject(read_pyproject(p.resolve())),
-            kind="path", path=p.resolve(),
-        )
-    return None
-
-
-def _resolve_image(spec: str) -> NamespaceSpec | None:
-    """`host/path:tag` strings — pre-built image references."""
-    if "/" in spec and ":" in spec and not spec.startswith((".", "/")):
-        return NamespaceSpec(short=_short_from_image(spec), kind="image", image_ref=spec)
-    return None
-
-
-def _resolve_pypi_fallback(spec: str) -> NamespaceSpec:
-    """Last-chance: assume the bare name is a published PyPI dist."""
-    return NamespaceSpec(short=spec, kind="pypi", pypi_dist=f"agentix-{spec}")
-
-
-# Ordered most-specific to least-specific. `resolve_spec` returns the
-# first non-None answer; the PyPI fallback always claims, so the chain
-# is total. Primitives + deployments used to live in-tree under
-# `primitives/` and `agentix/deployment/`; they ship as their own
-# wheels now (agentix-runtime-basic, agentix-deployment-docker, …),
-# so the local-repo resolver was removed.
-_RESOLVERS = (_resolve_path, _resolve_image, _resolve_pypi_fallback)
-
-
-def resolve_spec(spec: str) -> NamespaceSpec:
-    """Walk every built-in resolver in priority order; first match wins."""
-    for resolver in _RESOLVERS:
-        result = resolver(spec)
-        if result is not None:
-            return result
-    raise SystemExit(f"no resolver claimed {spec!r}")  # unreachable; pypi fallback claims
-
-
-__all__ = ["REPO_ROOT", "NamespaceSpec", "read_pyproject", "resolve_spec"]
+__all__ = ["REPO_ROOT", "derive_tag", "read_pyproject", "short_name"]

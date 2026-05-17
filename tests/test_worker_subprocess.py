@@ -40,7 +40,7 @@ def worker_env(monkeypatch):
 
 def _make_multiplexer(trace_forwarder=None) -> NamespaceMultiplexer:
     mp = NamespaceMultiplexer(trace_forwarder=trace_forwarder)
-    mp.register_subprocess(_PACKAGE, _TARGET, sys.executable, dist_name="test-worker")
+    mp._register_subprocess(_PACKAGE, _TARGET, sys.executable, dist_name="test-worker")
     return mp
 
 
@@ -60,7 +60,7 @@ async def test_subprocess_worker_unary_round_trip(worker_env):
 async def test_subprocess_worker_bad_target_fails_without_hanging(worker_env):
     """A worker that exits before READY must surface an error, not hang startup."""
     mp = NamespaceMultiplexer()
-    mp.register_subprocess(
+    mp._register_subprocess(
         "agentix.missing",
         "agentix.definitely_missing:Nope",
         sys.executable,

@@ -1,8 +1,8 @@
 """Namespace dispatch — binds public functions for RPC, routes wire requests to impls.
 
 The runtime's multiplexer instantiates one `Dispatcher` per namespace
-inside a worker subprocess; in-process tests bind directly via
-`multiplexer.register_inprocess(target)`.
+inside a worker subprocess. Tests bypass the subprocess path via
+`Multiplexer._register_inprocess(target)`.
 
 Split into:
 

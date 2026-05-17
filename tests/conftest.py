@@ -3,7 +3,7 @@
 Namespaces are discovered via the entry-point mechanism in production
 (walked at multiplexer.discover_entry_points()). For tests we bypass
 `importlib.metadata.entry_points` and inject classes directly via
-`multiplexer.register_inprocess()`, which builds an in-process
+`multiplexer._register_inprocess()`, which builds an in-process
 Dispatcher binding. The same multiplexer dispatches in-process classes
 and subprocess workers uniformly, so test coverage exercises the full
 transport (Socket.IO + /_remote) without forcing each test class into
@@ -77,7 +77,7 @@ def register_namespace(runtime_module) -> Callable[..., None]:
     server, _, _ = runtime_module
 
     def _register(cls: type) -> None:
-        server.multiplexer.register_inprocess(cls)
+        server.multiplexer._register_inprocess(cls)
 
     return _register
 

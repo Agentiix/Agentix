@@ -7,7 +7,7 @@ multiplexer's job is to:
 
   1. **Discover** what namespaces exist in the bundle. In production
      this walks each `/venvs/<short>/` for entry points; in tests it
-     accepts in-process registrations via `register_inprocess(...)`.
+     accepts in-process registrations via `_register_inprocess(...)`.
   2. **Spawn workers lazily.** First dispatch for a namespace forks
      `python -m agentix.runtime.server.worker --target <pkg>:<class>` using
      that namespace's venv interpreter, plumbs stdin/stdout for frames.
@@ -438,72 +438,49 @@ class NamespaceMultiplexer:
     # ── discovery ───────────────────────────────────────────────────
 
     def discover_entry_points(self) -> None:
-        """Discover namespace entry points across whichever bundle layout
-        we're running in.
+        """Walk installed `agentix.namespace` entry points and pre-register.
 
-        The framework's bundle CLI has two modes:
+        Two layouts:
 
-          * **Merged (default).** Every namespace pip-installed into
-            `/nix/runtime/` alongside the framework. One venv, one bin/.
-            Discovery walks `/nix/runtime/`'s site-packages for entry
-            points; workers spawn from that venv's interpreter.
-          * **Isolated (`agentix build --isolated`).** Per-namespace
-            venvs at `/nix/<short>/`. Discovery walks each. Workers
-            spawn from the respective venv interpreter with the
-            namespace's own bin/ on PATH.
+          * **Bundle.** A `/nix/runtime/` directory exists with the
+            framework + every pip-installed plugin in its
+            site-packages. Discovery walks that venv's entry points.
+          * **Dev / test.** No bundle layout; fall back to walking the
+            current Python's installed entry points.
 
-        In dev / test (no bundle layout), fall back to walking the
-        current Python's installed entry points — every namespace
-        pip-installed in the same env is reachable via `sys.executable`.
-
-        Tests using `register_inprocess()` skip this entirely.
+        Tests using `_register_inprocess()` skip this entirely.
         """
-        nix_root = Path("/nix")
-        if (nix_root / "runtime").is_dir():
-            # Bundle layout — `/nix/runtime` always carries the framework;
-            # in merged mode it also carries every namespace. The walker
-            # records `/nix/runtime` as a discoverable venv unconditionally;
-            # any per-namespace sibling dirs from isolated mode get walked
-            # too. (A purely-merged bundle has no siblings; a purely-isolated
-            # bundle has no namespace entry points under /nix/runtime.)
-            self._discover_from_nix(nix_root)
+        nix_runtime = Path("/nix/runtime")
+        if nix_runtime.is_dir():
+            self._discover_from_nix(nix_runtime)
         else:
             self._discover_from_current_env()
 
-    # Names under /nix/ that are NOT venvs we should walk.
-    _NIX_NON_NAMESPACE = frozenset({"store"})
-
-    def _discover_from_nix(self, nix_root: Path) -> None:
-        for venv in sorted(nix_root.iterdir()):
-            if not venv.is_dir():
-                continue
-            if venv.name in self._NIX_NON_NAMESPACE or venv.name.startswith("."):
-                continue
-            python = venv / "bin" / "python"
-            if not python.exists():
-                continue
-            site_pkgs_candidates = list(venv.glob("lib/python*/site-packages"))
-            if not site_pkgs_candidates:
-                continue
-            site_pkgs = site_pkgs_candidates[0]
-            bin_dir = venv / "bin"
-            # Record the venv even if it carries no entry points — on-demand
-            # registration will probe it for arbitrary user modules.
-            self._venv_pythons.append((str(python), bin_dir))
-            for dist in importlib.metadata.distributions(path=[str(site_pkgs)]):
-                for ep in dist.entry_points:
-                    if ep.group != NAMESPACE_ENTRY_POINT_GROUP:
-                        continue
-                    # See _discover_from_current_env: package routing key
-                    # is the left-of-colon portion (the module path).
-                    package = ep.value.split(":", 1)[0]
-                    self._entries[package] = _NamespaceEntry(
-                        package=package,
-                        dist_name=dist.metadata["Name"] or "",
-                        dist_version=dist.version or "",
-                        target=ep.value, python=str(python),
-                        bin_dir=bin_dir,
-                    )
+    def _discover_from_nix(self, venv: Path) -> None:
+        """Walk the bundle's single venv (/nix/runtime/) for entry points."""
+        python = venv / "bin" / "python"
+        bin_dir = venv / "bin"
+        site_pkgs_candidates = list(venv.glob("lib/python*/site-packages"))
+        if not python.exists() or not site_pkgs_candidates:
+            return
+        site_pkgs = site_pkgs_candidates[0]
+        # Record the venv even if it carries no entry points — on-demand
+        # registration will probe it for arbitrary user modules.
+        self._venv_pythons.append((str(python), bin_dir))
+        for dist in importlib.metadata.distributions(path=[str(site_pkgs)]):
+            for ep in dist.entry_points:
+                if ep.group != NAMESPACE_ENTRY_POINT_GROUP:
+                    continue
+                # See _discover_from_current_env: package routing key is
+                # the left-of-colon portion (the module path).
+                package = ep.value.split(":", 1)[0]
+                self._entries[package] = _NamespaceEntry(
+                    package=package,
+                    dist_name=dist.metadata["Name"] or "",
+                    dist_version=dist.version or "",
+                    target=ep.value, python=str(python),
+                    bin_dir=bin_dir,
+                )
 
     def _discover_from_current_env(self) -> None:
         # Always make sys.executable available for on-demand registration,
@@ -528,9 +505,19 @@ class NamespaceMultiplexer:
                 target=ep.value, python=sys.executable,
             )
 
-    def register_inprocess(self, cls: type) -> None:
-        """Test helper: bind a class in-process. Bypasses subprocess and
-        venv discovery. Production callers should not use this."""
+    # ── test-only registration paths ────────────────────────────────
+    # Underscore-prefixed because production code never reaches these:
+    # entry-point discovery (`discover_entry_points`) and on-demand
+    # registration (`_auto_register`) are the only production paths.
+    # Tests use these to bypass venv discovery for fixtures.
+
+    def _register_inprocess(self, cls: type) -> None:
+        """Bind a class in-process — bypasses subprocess + venv discovery.
+
+        Used in pytest fixtures (see tests/conftest.py) to make a
+        regular Python class a dispatchable namespace inside the same
+        process the runtime runs in.
+        """
         package = cls.__module__
         dispatcher = Dispatcher().bind_namespace(cls)
         self._entries[package] = _NamespaceEntry(
@@ -538,7 +525,7 @@ class NamespaceMultiplexer:
             dispatcher=dispatcher,
         )
 
-    def register_subprocess(
+    def _register_subprocess(
         self,
         package: str,
         target: str,
@@ -550,10 +537,9 @@ class NamespaceMultiplexer:
     ) -> None:
         """Register a subprocess-backed namespace explicitly.
 
-        Production discovery (`discover_entry_points()`) builds these
-        entries from installed entry points. Tests that need to exercise
-        the real subprocess path (rather than `_InProcessWorker`) can
-        register their own here without poking at `_entries` directly.
+        Used by tests that need to exercise the real subprocess path
+        rather than `_InProcessWorker`. Production code never calls
+        this — entries are built from installed entry points.
         """
         self._entries[package] = _NamespaceEntry(
             package=package, dist_name=dist_name, dist_version=dist_version,
