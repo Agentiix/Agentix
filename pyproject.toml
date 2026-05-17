@@ -2,7 +2,11 @@
 name = "agentix"
 version = "0.1.0"
 description = "Execution, tracing, and integration bridge for agent workflows"
+readme = "README.md"
 requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Agentiix" }]
+urls = { Homepage = "https://github.com/Agentiix/Agentix" }
 dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
