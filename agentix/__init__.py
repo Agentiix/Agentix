@@ -19,8 +19,7 @@ __path__ = pkgutil.extend_path(__path__, __name__)
 # without circular-import gymnastics. It has no runtime deps and registers an
 # emitter only when the server boots, so this is cheap.
 from agentix import trace
-from agentix.deployment.base import Sandbox
-from agentix.deployment.docker import DockerDeployment
+from agentix.deployment.base import Deployment, Sandbox
 from agentix.dispatch import Dispatcher
 from agentix.models import SandboxConfig, SandboxInfo
 from agentix.rollout import RolloutPool
@@ -33,8 +32,8 @@ __version__ = "0.1.0"
 __all__ = [
     "Bidi",
     "Channel",
+    "Deployment",
     "Dispatcher",
-    "DockerDeployment",
     "LogRecord",
     "RemoteCall",
     "RemoteCallError",

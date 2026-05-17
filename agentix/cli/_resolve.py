@@ -1,12 +1,12 @@
 """Spec resolution — internal helper for `agentix build`.
 
 A *spec* is whatever the user types on the command line: a short name
-(`bash`), a relative path (`./primitives/bash`), or an image reference
-(`docker.io/me/agent:0.1.0`). `resolve_spec` walks a hardcoded list of
-built-in resolvers in priority order and returns the first non-`None`
-answer.
+(`runtime-basic`), a relative path (`./Agentix-Runtime-Basic`), or an
+image reference (`docker.io/me/agent:0.1.0`). `resolve_spec` walks a
+hardcoded list of built-in resolvers in priority order and returns the
+first non-`None` answer.
 
-This is **not** a plugin axis. The four resolvers below cover every
+This is **not** a plugin axis. The three resolvers below cover every
 spec shape the CLI accepts; a new shape means editing this file, not
 shipping a wheel.
 """
@@ -82,14 +82,6 @@ def _resolve_image(spec: str) -> NamespaceSpec | None:
     return None
 
 
-def _resolve_local_repo(spec: str) -> NamespaceSpec | None:
-    """Short names looked up under the repo's `primitives/<name>/` tree."""
-    candidate = REPO_ROOT / "primitives" / spec
-    if candidate.is_dir() and (candidate / "pyproject.toml").is_file():
-        return NamespaceSpec(short=spec, kind="path", path=candidate)
-    return None
-
-
 def _resolve_pypi_fallback(spec: str) -> NamespaceSpec:
     """Last-chance: assume the bare name is a published PyPI dist."""
     return NamespaceSpec(short=spec, kind="pypi", pypi_dist=f"agentix-{spec}")
@@ -97,8 +89,11 @@ def _resolve_pypi_fallback(spec: str) -> NamespaceSpec:
 
 # Ordered most-specific to least-specific. `resolve_spec` returns the
 # first non-None answer; the PyPI fallback always claims, so the chain
-# is total.
-_RESOLVERS = (_resolve_path, _resolve_image, _resolve_local_repo, _resolve_pypi_fallback)
+# is total. Primitives + deployments used to live in-tree under
+# `primitives/` and `agentix/deployment/`; they ship as their own
+# wheels now (agentix-runtime-basic, agentix-deployment-docker, …),
+# so the local-repo resolver was removed.
+_RESOLVERS = (_resolve_path, _resolve_image, _resolve_pypi_fallback)
 
 
 def resolve_spec(spec: str) -> NamespaceSpec:

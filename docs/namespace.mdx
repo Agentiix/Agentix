@@ -52,7 +52,7 @@ helpers — anything you want. The framework's discovery picks only
 remote methods; everything else is regular Python that callers import
 normally.
 
-`primitives/bash` and `primitives/files` are working in-tree examples.
+the `bash` namespace in [`agentix-runtime-basic`](https://github.com/Agentiix/Agentix-Runtime-Basic) and the `files` namespace in [`agentix-runtime-basic`](https://github.com/Agentiix/Agentix-Runtime-Basic) are working in-tree examples.
 
 ## Using one
 
@@ -65,7 +65,7 @@ async with RuntimeClient(sandbox.runtime_url) as c:
     print(result.stdout)        # → "hi\n"
 ```
 
-`pip install agentix-bash` is everything the caller needs.
+`pip install agentix-runtime-basic` is everything the caller needs.
 
 ## Streaming methods
 

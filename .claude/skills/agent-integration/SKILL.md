@@ -315,7 +315,8 @@ docker build -t agentix-hub/<name>:0.1.0 <name>/    # context = the closure dir
 
 # In a tiny script:
 import asyncio
-from agentix import DockerDeployment, RuntimeClient, SandboxConfig
+from agentix import RuntimeClient, SandboxConfig
+from agentix.deployment.docker import DockerDeployment
 from agentix_closures import <name>
 
 async def check():

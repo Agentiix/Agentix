@@ -104,19 +104,20 @@ types across the host-to-container boundary.
   [`swebench`](https://github.com/swe-bench/SWE-bench) package's
   `make_test_spec` + `get_eval_report`
 
-### In-tree Primitives
+### Sandbox Primitives
 
-- **bash** — [`primitives/bash`](primitives/bash); shell execution
-  inside the rollout container.
-- **files** — [`primitives/files`](primitives/files); upload,
-  download, and edit files in the rollout container.
+- **bash** — shell execution inside the rollout container. Ships with
+  [`agentix-runtime-basic`](https://github.com/Agentiix/Agentix-Runtime-Basic).
+- **files** — upload, download, and edit files in the rollout container.
+  Same wheel.
 
 ### Execution Backends
 
-- `local` — built-in, Docker-based
-- `daytona` — built-in
-- `e2b` — built-in
-- Third-party — `pip install agentix-deployment-<name>`
+- `local` — Docker-based; ships with
+  [`agentix-deployment-docker`](https://github.com/Agentiix/Agentix-Deployment-Docker).
+- `daytona` — [`agentix-deployment-daytona`](https://github.com/Agentiix/Agentix-Deployment-Daytona).
+- `e2b` — [`agentix-deployment-e2b`](https://github.com/Agentiix/Agentix-Deployment-E2B).
+- Third-party — `pip install agentix-deployment-<name>`.
 
 ### RL Frameworks / Serving Providers
 
@@ -154,7 +155,9 @@ never blocks boot.
 ## Install
 
 ```bash
-pip install agentix agentix-bash agentix-files
+pip install agentix \
+            agentix-runtime-basic \
+            agentix-deployment-docker
 ```
 
 Cookbook integrations:
@@ -169,16 +172,18 @@ Framework development:
 ```bash
 git clone https://github.com/Agentiix/Agentix && cd Agentix
 pip install -e '.[dev]'
-pip install -e primitives/bash -e primitives/files
+# Pair with sibling repos checked out next to Agentix/ for a working
+# rollout end-to-end:
+pip install -e ../Agentix-Runtime-Basic -e ../Agentix-Deployment-Docker
 ```
 
 ## CLI
 
 ```bash
-agentix build primitives/bash                              # one integration image
-agentix build bash files claude-code -o my-agent:0.1.0     # bundle several
-agentix deploy local --image my-agent:0.1.0                # run a rollout container
-agentix check                                              # smoke-test every installed integration
+agentix build ./Agentix-Runtime-Basic                        # one integration image
+agentix build ./ns-a ./ns-b ./ns-c -o my-agent:0.1.0         # bundle several
+agentix deploy local --image my-agent:0.1.0                  # run a rollout container
+agentix check                                                # smoke-test every installed integration
 ```
 
 ## Write an integration

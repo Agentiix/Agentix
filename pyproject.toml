@@ -33,16 +33,14 @@ agentix = "agentix.cli:main"
 # Runtime server entrypoint — the bundle image's Docker ENTRYPOINT.
 agentix-server = "agentix.runtime.server:main"
 
-# Builtin deployments. Downstream backends declare additional entries
-# under the same group (`[project.entry-points."agentix.deployment"]`
-# in their pyproject.toml) and `pip install` makes them available to
-# `agentix deploy <name>` with zero framework changes. This is one of
-# the two plugin axes the framework supports; the other is
-# `agentix.namespace`.
-[project.entry-points."agentix.deployment"]
-local = "agentix.deployment.docker:DockerDeployment"
-daytona = "agentix.deployment.daytona:DaytonaDeployment"
-e2b = "agentix.deployment.e2b:E2BDeployment"
+# Deployment backends and namespace primitives ship in their own
+# wheels — each `pip install` registers its own entry points under
+# `agentix.deployment` / `agentix.namespace`. The framework discovers
+# them at startup; nothing here.
+#   pip install agentix-deployment-docker   # registers `local`
+#   pip install agentix-deployment-daytona  # registers `daytona`
+#   pip install agentix-deployment-e2b      # registers `e2b`
+#   pip install agentix-runtime-basic       # registers `bash`, `files`
 
 [build-system]
 requires = ["hatchling"]

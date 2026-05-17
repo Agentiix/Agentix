@@ -16,19 +16,19 @@ calls a sandboxed namespace as if it were a local typed function.
 <Tabs>
   <Tab title="pip">
     ```bash
-    pip install agentix agentix-bash agentix-files
+    pip install agentix agentix-runtime-basic agentix-deployment-docker
     ```
   </Tab>
   <Tab title="uv">
     ```bash
-    uv add agentix agentix-bash agentix-files
+    uv add agentix agentix-runtime-basic agentix-deployment-docker
     ```
   </Tab>
   <Tab title="From source">
     ```bash
     git clone https://github.com/Agentiix/Agentix
     cd Agentix && pip install -e '.[dev]'
-    pip install -e ./primitives/bash -e ./primitives/files
+    pip install -e ../Agentix-Runtime-Basic
     ```
   </Tab>
 </Tabs>
@@ -40,8 +40,8 @@ agentix check
 ```
 
 ```text
-OK   bash    agentix.bash    agentix-bash@0.1.0
-OK   files   agentix.files   agentix-files@0.1.0
+OK   bash    agentix.bash    agentix-runtime-basic@0.1.0
+OK   files   agentix.files   agentix-runtime-basic@0.1.0
 ```
 
 ## Call a namespace

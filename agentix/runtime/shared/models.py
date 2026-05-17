@@ -107,6 +107,7 @@ class TraceEvent(BaseModel):
 
 # Shell exec and file I/O used to live at this layer too (ExecRequest /
 # ExecResponse, UploadResponse). They moved to the `bash` and `files`
-# primitive namespaces under `primitives/`. Their request/response shapes
-# live in those namespace packages (`BashResult`, `UploadResult` etc.) and
-# travel as ordinary namespace dispatches over /_remote.
+# namespaces, which ship in the `agentix-runtime-basic` wheel. Their
+# request/response shapes live in those namespace packages (`BashResult`,
+# `UploadResult` etc.) and travel as ordinary namespace dispatches over
+# /_remote.

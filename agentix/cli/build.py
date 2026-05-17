@@ -2,19 +2,18 @@
 
 Usage:
 
-    agentix build primitives/bash                              # one namespace, auto-tag
-    agentix build bash                                         # short name → primitives/bash
-    agentix build primitives/bash -o my-bash:dev               # explicit tag
-    agentix build bash files claude-code -o my-agent:0.1.0     # bundle several namespaces
-    agentix build bash files --dry-run -o sandbox:dev          # stage to ./build/<tag>/
+    agentix build ./Agentix-Runtime-Basic                        # one namespace, auto-tag
+    agentix build ./Agentix-Runtime-Basic -o my-bundle:dev       # explicit tag
+    agentix build ./ns-a ./ns-b ./ns-c -o my-agent:0.1.0         # bundle several namespaces
+    agentix build ./ns-a ./ns-b --dry-run -o sandbox:dev         # stage to ./build/<tag>/
 
 Each spec is one of:
 
   1. **Path:** a directory containing `pyproject.toml` and the namespace's
      Python package under `src/agentix/<name>/`.
   2. **Image ref:** pre-built — `:` AND `/` (not yet wired).
-  3. **Short name:** searched against `primitives/<name>/` in the repo,
-     falling back to PyPI `agentix-<name>` (currently stubbed).
+  3. **Short name:** assumed to be a PyPI dist `agentix-<name>`
+     (currently stubbed — wheel-based builds aren't wired yet).
 
 Build shape — every namespace gets its own venv under `/nix/<short>/`:
 
@@ -32,9 +31,10 @@ Build shape — every namespace gets its own venv under `/nix/<short>/`:
   Bundles with no `default.nix` anywhere skip Nix entirely.
 
   The output image extends `agentix/runtime:<framework-version>` (override
-  via `--runtime-image`). If that image isn't present locally, `agentix
-  build` auto-builds it from `primitives/_template/Dockerfile` — users
-  don't run `docker build` directly.
+  via `--runtime-image`). If that image isn't present locally, build it
+  from `Agentix-Runtime-Basic/runtime/Dockerfile` or pull it from your
+  registry — the CLI no longer auto-builds it, since the template now
+  ships with a separate wheel.
 """
 
 from __future__ import annotations
@@ -49,8 +49,6 @@ from tempfile import TemporaryDirectory
 
 from agentix import __version__ as FRAMEWORK_VERSION
 from agentix.cli._resolve import REPO_ROOT, NamespaceSpec, read_pyproject, resolve_spec
-
-_RUNTIME_DOCKERFILE = REPO_ROOT / "primitives" / "_template" / "Dockerfile"
 
 _SOURCE_SKIP = {
     "__pycache__", ".venv", "build", "dist", ".git",
@@ -102,39 +100,24 @@ def _image_exists_locally(image: str) -> bool:
 
 
 def _ensure_runtime_image(runtime_image: str) -> None:
-    """Build the runtime image from primitives/_template/Dockerfile if missing.
+    """Verify the runtime base image exists locally.
 
-    Auto-build keeps `agentix build` a single user-facing command — no
-    side-trip to `docker build -f primitives/_template/Dockerfile .`. The
-    runtime image rarely changes (only when the framework version bumps);
-    subsequent calls skip the build entirely.
+    The base image used to be auto-built from
+    `primitives/_template/Dockerfile`, but that template ships with
+    `agentix-runtime-basic` now (under its `runtime/Dockerfile`).
+    Users either pull the image from a registry or build it from
+    that repo:
+
+        docker build -t agentix/runtime:<version> \\
+            -f /path/to/Agentix-Runtime-Basic/runtime/Dockerfile .
     """
     if _image_exists_locally(runtime_image):
         return
-    if not _RUNTIME_DOCKERFILE.is_file():
-        raise SystemExit(
-            f"runtime image {runtime_image} not found locally and template "
-            f"Dockerfile is missing at {_RUNTIME_DOCKERFILE}"
-        )
-    print(
-        f"runtime image {runtime_image!r} not found locally; building from "
-        f"{_RUNTIME_DOCKERFILE.relative_to(REPO_ROOT)} (one-time)…",
-        file=sys.stderr,
+    raise SystemExit(
+        f"runtime image {runtime_image!r} not found locally. Build it from "
+        f"Agentix-Runtime-Basic (`runtime/Dockerfile`) or pull it from your "
+        f"registry, then re-run `agentix build`."
     )
-    proc = subprocess.run(
-        [
-            "docker", "build",
-            "-t", runtime_image,
-            "-f", str(_RUNTIME_DOCKERFILE),
-            str(REPO_ROOT),
-        ],
-        check=False,
-    )
-    if proc.returncode != 0:
-        raise SystemExit(
-            f"failed to build runtime image {runtime_image!r} "
-            f"(docker build returned {proc.returncode})"
-        )
 
 
 def _stage(specs: list[tuple[NamespaceSpec, Path]], build_dir: Path) -> None:
@@ -250,9 +233,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument(
         "--runtime-image", default=f"agentix/runtime:{FRAMEWORK_VERSION}",
-        help="base runtime image the bundle extends. Auto-built from "
-             "primitives/_template/Dockerfile if not present locally. "
-             f"(default: agentix/runtime:{FRAMEWORK_VERSION})",
+        help="base runtime image the bundle extends. Must exist locally; "
+             "build it from Agentix-Runtime-Basic/runtime/Dockerfile or pull "
+             f"it from your registry. (default: agentix/runtime:{FRAMEWORK_VERSION})",
     )
     parser.add_argument("--dry-run", action="store_true",
                         help="stage to ./build/<tag>/ and print path; do NOT invoke docker")

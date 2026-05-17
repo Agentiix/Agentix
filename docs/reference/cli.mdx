@@ -13,21 +13,20 @@ Build one namespace image, or bundle several into a single image.
 
 ```bash
 # One namespace — tag auto-derived from pyproject.toml
-agentix build primitives/bash
-agentix build bash --dry-run
-agentix build bash -o my-bash:dev
+agentix build ../Agentix-Runtime-Basic
+agentix build ../Agentix-Runtime-Basic --dry-run
+agentix build ../Agentix-Runtime-Basic -o my-bundle:dev
 
 # Many namespaces — explicit -o required
-agentix build bash files claude-code -o my-agent:0.1.0
-agentix build primitives/bash ./my-experimental-namespace -o demo:dev
-agentix build bash files --dry-run -o sandbox:dev
+agentix build ../Agentix-Runtime-Basic ../claude-code -o my-agent:0.1.0
+agentix build ../Agentix-Runtime-Basic ./my-experimental-namespace -o demo:dev
+agentix build ../Agentix-Runtime-Basic ../claude-code --dry-run -o sandbox:dev
 ```
 
 Each spec accepts:
 
-- **Path:** `./primitives/bash` or any directory with a `pyproject.toml`.
-- **Short name:** looked up under the repo's `primitives/`.
-- **PyPI dist:** `agentix-bash` (currently raises `NotImplementedError`).
+- **Path:** `../Agentix-Runtime-Basic` or any directory with a `pyproject.toml`.
+- **PyPI dist:** `agentix-runtime-basic` (currently raises `NotImplementedError`).
 
 `-o / --output / --tag` is the output image tag. With one spec it's
 optional (auto-derived as `agentix/<short>:<version>`). With multiple

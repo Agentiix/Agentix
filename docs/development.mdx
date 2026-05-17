@@ -8,7 +8,7 @@ description: Local setup, daily workflow, and how to add a new namespace to the 
 - Python 3.11+
 - [Docker](https://docs.docker.com/get-docker/) — the only host
   requirement. Nix runs inside the builder stage of
-  [`primitives/_template/Dockerfile`](https://github.com/Agentiix/Agentix/tree/master/primitives/_template).
+  [`Agentix-Runtime-Basic/runtime/Dockerfile`](https://github.com/Agentiix/Agentix/tree/master/../Agentix-Runtime-Basic/runtime).
 
 ## Setup
 
@@ -16,7 +16,7 @@ description: Local setup, daily workflow, and how to add a new namespace to the 
 git clone https://github.com/Agentiix/Agentix.git
 cd Agentix
 pip install -e '.[dev]'                        # fastapi, uvicorn, httpx, pytest, ruff
-pip install -e primitives/bash primitives/files
+pip install -e ../Agentix-Runtime-Basic
 ```
 
 ## Daily workflow
@@ -30,13 +30,13 @@ agentix-server --port 9000
 
 Without any namespaces installed the server exposes its built-ins only
 (`/health`, `/exec`, `/upload`, `/download`). Useful for iterating on
-the runtime without the Docker round-trip; `pip install -e primitives/bash`
+the runtime without the Docker round-trip; `pip install -e ../Agentix-Runtime-Basic`
 makes `agentix.bash:Bash` discoverable on the next start.
 
 ### Build the runtime image (once)
 
 ```bash
-docker build -t agentix/runtime:0.1.0 -f primitives/_template/Dockerfile .
+docker build -t agentix/runtime:0.1.0 -f ../Agentix-Runtime-Basic/runtime/Dockerfile .
 ```
 
 This produces the base image every namespace bundle extends. Rebuild
@@ -45,8 +45,8 @@ whenever the framework version bumps.
 ### Build a namespace bundle
 
 ```bash
-agentix build primitives/bash                              # → agentix/bash:0.1.0
-agentix build primitives/bash primitives/files -o my-sandbox:dev   # → bundle of both
+agentix build ../Agentix-Runtime-Basic                              # → agentix/bash:0.1.0
+agentix build ../Agentix-Runtime-Basic ../Agentix-Runtime-Basic -o my-sandbox:dev   # → bundle of both
 ```
 
 A bundle image extends the runtime, pip-installs each namespace, and
@@ -76,7 +76,7 @@ asyncio.run(main())
 ### Lint & test
 
 ```bash
-ruff check agentix/ tests/ primitives/
+ruff check agentix/ tests/
 pytest                      # unit tests
 pytest -x                   # stop on first failure
 ```
@@ -88,7 +88,7 @@ produces) with one entry-point declaration. The fastest path is to
 copy the template:
 
 ```bash
-cp -r primitives/_template my-namespace
+cp -r ../Agentix-Runtime-Basic/runtime my-namespace
 # edit my-namespace/pyproject.toml (name, entry point)
 # edit my-namespace/src/agentix/<name>/__init__.py (your class)
 agentix build my-namespace
@@ -105,5 +105,5 @@ drop a `default.nix` next to its `pyproject.toml` declaring those deps;
 `agentix build` will splice in a Nix builder stage automatically.
 
 See [Namespace protocol](/reference/namespace-protocol) for the full
-contract, and [`primitives/bash`](https://github.com/Agentiix/Agentix/tree/master/primitives/bash)
+contract, and [the `bash` namespace in [`agentix-runtime-basic`](https://github.com/Agentiix/Agentix-Runtime-Basic)](https://github.com/Agentiix/Agentix/tree/master/../Agentix-Runtime-Basic)
 for a working in-tree example.

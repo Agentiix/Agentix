@@ -45,7 +45,10 @@ agentix/
 │   ├── client/             — orchestrator-side RuntimeClient (HTTP + Socket.IO)
 │   └── server/             — sandbox-side multiplexer + FastAPI/SIO app + worker
 │         (app, sio, llm_proxy, trace_bridge, multiplexer, worker)
-├── deployment/         — Deployment Protocol + backends (docker / daytona / e2b)
+├── deployment/         — Deployment Protocol + the entry-point loader. Backends
+│   │                      (local / daytona / e2b / third-party) ship as separate
+│   │                      wheels — see Ecosystem packages below.
+│   ├── base.py             — Sandbox dataclass + Deployment Protocol
 │   └── _plugin.py          — Registry[T] for the `agentix.deployment` entry-point group
 ├── rollout/            — RolloutPool: ephemeral sandbox pool for batched RL rollouts
 └── cli/                — `agentix` command-line: build, deploy, check
@@ -73,13 +76,42 @@ One-line per system:
   script). The `NamespaceMultiplexer` spawns one worker subprocess per
   namespace (`python -m agentix.runtime.server.worker`) and routes
   frames; the FastAPI + Socket.IO app is the entry surface.
-- **deployment** — `Deployment` Protocol + backends. The `local` backend
-  is `DockerDeployment`; `daytona` and `e2b` are stubs. Plugin axis #2 is
-  this one (the `_plugin.Registry[T]` here is the registry).
+- **deployment** — `Deployment` Protocol + plugin loader. The concrete
+  backends live in separate wheels (`agentix-deployment-docker`,
+  `-daytona`, `-e2b`) that install `agentix/deployment/<backend>.py`
+  next to core's `base.py`. This is plugin axis #2 — `pip install` a
+  backend wheel and `agentix deploy <name>` picks it up with zero core
+  changes.
 - **rollout** — `RolloutPool` allocates/recycles sandboxes for RL training
   loops. Sits on top of `Deployment` + `RuntimeClient`.
 - **cli** — `agentix build / deploy / check`. Hardcoded subcommands; no
   plugin surface (third-party verbs ship their own `console_scripts`).
+
+## Ecosystem packages
+
+Core `agentix` deliberately ships **no** backend implementations, no
+shell/file primitives, and no Dockerfile templates. Those live in
+sibling repos / wheels so users `pip install` exactly the set they
+need:
+
+| Wheel | Repo | Entry points |
+|---|---|---|
+| `agentix-runtime-basic` | [Agentix-Runtime-Basic](https://github.com/Agentiix/Agentix-Runtime-Basic) | `agentix.namespace: bash, files` |
+| `agentix-deployment-docker` | [Agentix-Deployment-Docker](https://github.com/Agentiix/Agentix-Deployment-Docker) | `agentix.deployment: local` |
+| `agentix-deployment-daytona` | [Agentix-Deployment-Daytona](https://github.com/Agentiix/Agentix-Deployment-Daytona) | `agentix.deployment: daytona` |
+| `agentix-deployment-e2b` | [Agentix-Deployment-E2B](https://github.com/Agentiix/Agentix-Deployment-E2B) | `agentix.deployment: e2b` |
+
+A typical dev install:
+
+```bash
+pip install agentix \
+            agentix-runtime-basic \
+            agentix-deployment-docker
+```
+
+Downstream repos (`Agentix-Agents-Hub`, `Agentix-Datasets`) follow the
+same shape — each one is a Python project declaring `agentix.namespace`
+entry points, installed alongside core.
 
 ## Architecture (typed Python namespaces, entry-point discovery)
 
@@ -104,10 +136,11 @@ That's it. Key (`bash`) is the short name for display; value (`agentix.bash`) is
 A namespace is a **normal Python project** (the shape `uv init --lib` produces) that contributes to the `agentix.*` import namespace:
 
 ```
-primitives/bash/
-├── pyproject.toml                  # name = "agentix-bash", [project.entry-points."agentix.namespace"]
-└── src/agentix/bash/               # `agentix/` has no __init__.py (PEP 420 namespace package)
-    └── __init__.py                 # async def run(...), async def run_stream(...), dataclasses, …
+Agentix-Runtime-Basic/                 # one such project; the `bash` + `files`
+├── pyproject.toml                     # primitives ship together as `agentix-runtime-basic`
+└── src/agentix/                       # `agentix/` has no __init__.py (PEP 420 namespace package)
+    ├── bash/__init__.py               # async def run(...), async def run_stream(...), …
+    └── files/__init__.py              # async def upload(...), async def download(...), …
 ```
 
 The framework's `agentix/__init__.py` extends its `__path__` via `pkgutil.extend_path`, so once a namespace dist installs files at `<site-packages>/agentix/bash/`, `from agentix import bash` resolves and `bash.run` is the remote-callable function. Multiple namespace dists can install peer entries under `agentix/` without colliding.
@@ -140,11 +173,11 @@ def _helper():                  # private — framework skips it
 * **No marker base class.** Namespace authors don't import or inherit from anything framework-specific — the package's identity comes from its entry-point declaration.
 * **Class-style targets still work.** If you prefer `class XYZ:` with `@staticmethod` methods (e.g. for IDE-grouped autocomplete), declare the entry point as `xyz = "agentix.xyz:XYZ"` and the dispatcher walks the class instead. Duck typing means the framework accepts either shape.
 
-`pip install ./primitives/bash` works as-is. `pytest`, `pyright`, `ruff`, `uv build` — every standard Python tool works against the namespace's source dir without further configuration.
+`pip install ./Agentix-Runtime-Basic` works as-is. `pytest`, `pyright`, `ruff`, `uv build` — every standard Python tool works against the namespace's source dir without further configuration.
 
 Build infrastructure is shared, not per-namespace:
 
-- `primitives/_template/Dockerfile` — the runtime image's Dockerfile; bundle images extend it
+- `Agentix-Runtime-Basic/runtime/Dockerfile` — the runtime image's Dockerfile; bundle images extend it
 - Per-namespace `default.nix` (optional) — only when the namespace needs native system deps
 
 The runtime loads each namespace lazily — the worker subprocess for a namespace is spawned on first `/_remote` call to that namespace; subsequent calls reuse the same worker.
@@ -170,19 +203,19 @@ Everything else (trace sinks, wire patterns, spec resolvers, CLI verbs) is pure 
 Developer commands ship as the `agentix` console script (`pip install -e .[dev]` registers it). The four built-in subcommands are hardcoded in `agentix/cli/__init__.py`:
 
 ```
-agentix build primitives/bash                              # build one namespace image
-agentix build bash files claude-code -o my-agent:0.1.0     # bundle several namespaces
-agentix deploy local --image my-agent:0.1.0                # run a sandbox
-agentix check                                              # list installed namespaces, smoke-import each
+agentix build ./Agentix-Runtime-Basic                          # build one namespace image
+agentix build ./ns-a ./ns-b ./ns-c -o my-agent:0.1.0           # bundle several namespaces
+agentix deploy local --image my-agent:0.1.0                    # run a sandbox
+agentix check                                                  # list installed namespaces, smoke-import each
 ```
 
-Each command is a thin module under `agentix/cli/`; `agentix --help` lists them. The four subcommands are hardcoded — third-party verbs go through their own `console_scripts` binaries, not a plugin registry.
+Each command is a thin module under `agentix/cli/`; `agentix --help` lists them. The three subcommands are hardcoded — third-party verbs go through their own `console_scripts` binaries, not a plugin registry.
 
-**`agentix build <spec>`** — builds a single namespace image. `<spec>` is an explicit path (`primitives/bash`), a short name resolved against the repo (`bash`), or a PyPI dist (`agentix-bash`, currently stubbed). Stages source + shared Dockerfile/nix into a temp dir, runs `docker build`.
+**`agentix build <spec>`** — builds a single namespace image. `<spec>` is an explicit path (a directory with `pyproject.toml`), or a PyPI dist (`agentix-runtime-basic`, currently stubbed). Stages source + shared Dockerfile/nix into a temp dir, runs `docker build`. The base runtime image (`agentix/runtime:<version>`) must already be present locally — build it from `Agentix-Runtime-Basic/runtime/Dockerfile` or pull it from your registry.
 
 **`agentix build <names> -o <tag>`** — same command, just N specs. Bundles multiple namespaces into one image. The runtime discovers them via `importlib.metadata.entry_points`, so no bundle disposition file is needed.
 
-**`agentix deploy <backend>`** — provisions a sandbox. `local` is wired through `DockerDeployment`; `daytona`/`e2b` are CLI surfaces awaiting their managed-sandbox integrations. Backends are one of the two plugin axes — they register under `agentix.deployment`, so `pip install agentix-deployment-fly` is enough for `agentix deploy fly --image …` to work without framework changes.
+**`agentix deploy <backend>`** — provisions a sandbox. The available backends are whatever you've `pip install`-ed: `agentix-deployment-docker` registers `local`, `agentix-deployment-daytona` registers `daytona`, etc. Backends are one of the two plugin axes — they register under `agentix.deployment`, so `pip install agentix-deployment-fly` is enough for `agentix deploy fly --image …` to work without framework changes.
 
 Foreground by default: prints `runtime_url`, holds the sandbox alive until Ctrl-C, then deletes. `--detach` exits after `create()` and just prints the sandbox handle.
 
@@ -196,7 +229,7 @@ without conflict. System deps (claude CLI, git, libffi, …) live under
 optional per-namespace `default.nix`. `agentix build` produces a
 single deploy-ready bundle image:
 
-1. **Runtime image** (`agentix/runtime:<version>`): `FROM python:3.11-slim`, framework wheel pre-installed into `/nix/runtime/`, plus `uv` for per-namespace venv creation, plus the wheel stashed at `/nix/.wheels/` for bundle stages. `agentix build` auto-builds this image from `primitives/_template/Dockerfile` if missing locally — users never run `docker build` directly.
+1. **Runtime image** (`agentix/runtime:<version>`): `FROM python:3.11-slim`, framework wheel pre-installed into `/nix/runtime/`, plus `uv` for per-namespace venv creation, plus the wheel stashed at `/nix/.wheels/` for bundle stages. The Dockerfile ships with `agentix-runtime-basic` (`runtime/Dockerfile`); `agentix build` fails fast if the runtime image isn't already present locally, since core no longer carries the template.
 2. **Bundle image** (`agentix build a b c -o tag`): extends the runtime image. If any spec ships `default.nix`, a Nix builder stage runs first; the derivation closure is COPY'd into `/nix/store/`. For each spec, `uv venv /nix/<short>` + `pip install` the namespace into that venv (alongside the framework wheel). For specs with `default.nix`, the derivation's `bin/*` is then symlinked into `/nix/<short>/bin/`. Bundles with no system deps anywhere skip Nix entirely.
 
 The runtime process itself doesn't load namespace code — the multiplexer spawns one **worker subprocess per namespace** on first call, using that namespace's venv interpreter. When spawning, the multiplexer **prepends `/nix/<short>/bin` to the worker's PATH** so user code can `subprocess.run("git", ...)` without knowing the absolute path. Workers stay alive for the sandbox's lifetime; the runtime forwards RPC frames over stdin/stdout.
@@ -300,7 +333,7 @@ async with RuntimeClient(sandbox.runtime_url) as c:
 
 ### PATH policy for the `bash` primitive
 
-Shell exec is the `bash` primitive namespace (`primitives/bash/`), not a runtime built-in. Invoke via `c.remote(Bash.run, command=...)`.
+Shell exec is the `bash` namespace, shipped by the `agentix-runtime-basic` wheel, not a runtime built-in. Invoke via `c.remote(bash.run, command=...)` after installing the wheel.
 
 User subprocess default `PATH=/usr/local/bin:/usr/bin:/bin`. Namespaces that ship native binaries via `default.nix` reference them by their absolute `/nix/store/<hash>/bin/<name>` path inside the impl — content-addressed paths are stable across the bundle's lifetime.
 

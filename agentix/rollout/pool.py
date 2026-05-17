@@ -3,8 +3,9 @@ many tasks. Bounds concurrency by sandbox slot, not by task count.
 
 Typical use for an RL training loop:
 
-    from agentix import DockerDeployment, RolloutPool, SandboxConfig
+    from agentix import RolloutPool, SandboxConfig
     from agentix.claude_code import ClaudeCode
+    from agentix.deployment.docker import DockerDeployment
 
     config = SandboxConfig(image="my-agent:0.1.0")
 

@@ -11,9 +11,9 @@ Submodules:
   - `llm_proxy`   — reverse-proxy `/_llm/<provider>/<path>` to upstream LLM APIs
   - `trace_bridge` — pipes `agentix.trace.emit(...)` to the Socket.IO `trace` room
 
-Shell exec and file I/O ship as the `bash` and `files` primitive
-namespaces under `primitives/`. Invoke via `c.remote(Bash.run, ...)` /
-`c.remote(Files.upload, ...)`.
+Shell exec and file I/O ship as the `bash` and `files` namespaces in
+the `agentix-runtime-basic` wheel. Invoke via `c.remote(bash.run, ...)`
+/ `c.remote(files.upload, ...)`.
 """
 
 from agentix.runtime.server.app import (
