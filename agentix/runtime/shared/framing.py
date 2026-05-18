@@ -12,20 +12,19 @@ handles encode/decode, including ext types for ndarray + pydantic models.
 Frame schemas (`{"type": "...", ...}` — extra fields per type):
 
   ─── runtime → worker ─────────────────────────────────────
-    call         {call_id, method, args, kwargs, kind: "unary"|"stream"|"bidi"}
+    call         {call_id, target, args, kwargs, kind: "unary"|"stream"|"bidi"}
     bidi_in      {call_id, item}            — push input chunk to a bidi call
     bidi_end_in  {call_id}                   — close input side of a bidi call
     cancel       {call_id}                   — abort an in-flight call
     shutdown     {}                          — graceful exit; worker drains then exits
 
   ─── worker → runtime ─────────────────────────────────────
-    ready        {package}                   — sent once after class binds OK
-    boot_error   {error}                     — sent once if class fails to bind
+    ready        {}                          — sent once after worker startup
+    boot_error   {error}                     — sent once if startup fails
     result       {call_id, value}            — unary success
     error        {call_id, error}            — unary failure or stream/bidi error
     stream_item  {call_id, value}            — one chunk of a streaming response
     stream_end   {call_id}                   — clean end of stream/bidi out
-    trace        {kind, payload, call_id?, source?}   — namespace trace.emit()
 
 `call_id` correlates request frames with their response frames.
 

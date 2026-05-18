@@ -1,6 +1,6 @@
 ---
 title: CLI reference
-description: Every agentix subcommand — build, deploy, check.
+description: Every agentix subcommand: build and deploy.
 ---
 
 ```bash
@@ -24,9 +24,9 @@ agentix build . --runtime-image agentix/runtime:0.2.0   # different base
 The positional arg is a path to a directory containing `pyproject.toml`.
 Whatever that project's `[project].dependencies` resolves to via pip
 ends up in the bundle's `/nix/runtime/` venv; at runtime the framework
-walks site-packages for `agentix.namespace` entry points and registers
-each one. Multi-plugin bundles are expressed by declaring multiple
-`agentix-*` dists as deps:
+imports target modules by their Python path on first remote call.
+Multi-plugin bundles are expressed by declaring multiple `agentix-*`
+dists as deps:
 
 ```toml
 # my-agent/pyproject.toml
@@ -58,21 +58,13 @@ agentix deploy local --image my-agent:0.1.0 --detach
 agentix deploy daytona --image docker.io/me/my-agent:0.1.0    # currently NotImplementedError
 ```
 
-`<backend>` is any registered `agentix.deployment` plugin. Built-ins:
-`local`, `daytona`, `e2b`.
+`<backend>` is any registered `agentix.deployment` plugin. The local
+Docker backend ships in `agentix-deployment-docker`; Daytona, E2B, and
+third-party backends ship as their own packages.
 
 Foreground by default: prints `runtime_url`, waits for Ctrl-C, tears
 the sandbox down. `--detach` exits after `create()` and prints the
 handle.
-
-## `agentix check`
-
-List installed namespaces and smoke-import each. Non-zero exit code
-if any fail.
-
-```bash
-agentix check
-```
 
 ## Configuration
 
@@ -81,10 +73,10 @@ Most config reads from environment variables.
 | Variable                          | Used by                    | Purpose                                |
 | --------------------------------- | -------------------------- | -------------------------------------- |
 | `AGENTIX_BIND_PORT`               | runtime server             | Bind port (default 8000)               |
-| `AGENTIX_UPLOAD_ROOT`             | `agentix.files` namespace  | Sandbox-side root for file I/O         |
+| `AGENTIX_UPLOAD_ROOT`             | `agentix.files` module     | Sandbox-side root for file I/O         |
 | `DAYTONA_API_KEY`                 | `daytona` deployment       | API auth                               |
 | `E2B_API_KEY` / `E2B_TEMPLATE_ID` | `e2b` deployment           | API auth + template                    |
 
 Third parties that want their own top-level verb should ship a
 separate `console_scripts` binary (`agentix-yourcmd`) rather than
-registering against the central dispatcher.
+registering against the central CLI.

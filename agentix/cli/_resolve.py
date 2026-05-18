@@ -7,9 +7,8 @@ neither the CLI nor the user enumerates them on the command line.
 
 This module owns the small bit of metadata extraction the build needs:
   * `read_pyproject(path)` — parse the project's pyproject.toml.
-  * `short_name(pyproject)` — display/tag short name. Prefers the first
-    `[project.entry-points."agentix.namespace"]` key (plugins) and falls
-    back to the dist name (user projects).
+  * `short_name(pyproject)` — display/tag short name derived from the
+    distribution name.
   * `derive_tag(pyproject)` — `<short>:<version>` from name+version.
 
 There's no multi-spec resolver, no PyPI fallback, no path-vs-image
@@ -35,25 +34,14 @@ def read_pyproject(project_dir: Path) -> dict:
 def short_name(pyproject: dict) -> str:
     """Derive a short display/tag name for the project.
 
-    Priority:
-      1. First key in `[project.entry-points."agentix.namespace"]` —
-         a plugin's self-declared short name.
-      2. `[project].name` with an optional `agentix-` prefix stripped.
-
     The short name only affects the image tag and a few build
     diagnostics — wire routing is by `fn.__module__`, which is
     determined by the user's actual Python import path.
     """
     project = pyproject.get("project", {})
-    ep_group = project.get("entry-points", {}).get("agentix.namespace", {})
-    if isinstance(ep_group, dict) and ep_group:
-        return next(iter(ep_group))
     name = project.get("name", "")
     if not isinstance(name, str) or not name:
-        raise SystemExit(
-            "pyproject.toml: [project].name is required when no "
-            "[project.entry-points.\"agentix.namespace\"] is declared"
-        )
+        raise SystemExit("pyproject.toml: [project].name is required")
     return name.removeprefix("agentix-")
 
 

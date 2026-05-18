@@ -1,10 +1,9 @@
-"""Protocol-level integration tests for the runtime server's dispatch path.
+"""Protocol-level integration tests for the runtime server's remote call path.
 
 These tests drive the real `agentix.runtime.server` FastAPI app over an
-ASGI transport. The fixture `register_namespace` injects a `Namespace`
-subclass straight into the runtime's registry, bypassing the
-`importlib.metadata.entry_points` discovery that production uses — same
-end state, no on-disk packaging.
+ASGI transport. The fixture `register_target` injects test classes into
+the runtime worker so protocol behavior can be tested without packaging
+temporary modules.
 
 Closure classes are declared at module scope so `eval_str=True` (used
 by the framework to resolve PEP 563 stringified annotations) can find
@@ -20,14 +19,17 @@ from dataclasses import dataclass
 
 import httpx
 import pytest
+import socketio
 
 from agentix import Channel, RemoteCallError, RuntimeClient
+from agentix.runtime.shared.codec import pack, unpack
+from agentix.runtime.shared.events import CANCEL, STREAM, STREAM_ERROR
 from agentix.runtime.shared.models import RemoteRequest
 
 pytestmark = pytest.mark.asyncio
 
 
-# ── namespace shapes used across tests ─────────────────────────────────
+# ── remote target shapes used across tests ──────────────────────────────
 
 
 @dataclass
@@ -103,24 +105,32 @@ class SlowEcho:
             yield Item(i=it.i)
 
 
-# ── registry + dispatch basics ───────────────────────────────────────
+class SlowStream:
+    @staticmethod
+    async def ticks() -> AsyncIterator[int]:
+        while True:
+            await asyncio.sleep(1)
+            yield 1
 
 
-async def test_register_namespace_makes_it_dispatchable(
-    runtime_module, register_namespace,
+# ── remote call basics ─────────────────────────────────────────────────
+
+
+async def test_registered_target_calls(
+    runtime_module, register_target,
 ):
-    """A registered target dispatches via /_remote."""
+    """An in-process test target calls via /_remote."""
     server, _, _ = runtime_module
-    register_namespace(Echo)
+    register_target(Echo)
     pkg = Echo.__module__
 
-    assert server.multiplexer.has(pkg)
+    assert server.worker.has(pkg)
 
     from agentix.runtime.shared.codec import pack, unpack
     transport = httpx.ASGITransport(app=server.app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
         body = pack(RemoteRequest(
-            package=pkg, method="echo", kwargs={"msg": "hi"},
+            target=f"{pkg}::echo", kwargs={"msg": "hi"},
         ).model_dump())
         r = await http.post("/_remote", content=body,
                             headers={"Content-Type": "application/msgpack"})
@@ -128,54 +138,54 @@ async def test_register_namespace_makes_it_dispatchable(
         assert unpack(r.content) == {"ok": True, "value": {"msg": "echo:hi"}, "error": None}
 
 
-async def test_remote_call_unknown_package_returns_error_body(runtime_module):
-    """An unimportable package returns a PackageNotLoaded error in-band
+async def test_remote_call_unknown_module_returns_error_body(runtime_module):
+    """An unimportable module returns a ModuleNotLoaded error in-band
     (wire stays 200), not a 404. The pre-flight has() check was removed
-    because it duplicated the multiplexer's own error path AND violated
+    because it duplicated the runtime worker's own error path AND violated
     the framework's 'wire stays 200, errors live in the body' policy."""
     server, _, _ = runtime_module
     from agentix.runtime.shared.codec import pack, unpack
     transport = httpx.ASGITransport(app=server.app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
         body = pack(RemoteRequest(
-            package="agentix.really.does.not.exist", method="x",
+            target="agentix.really.does.not.exist::x",
         ).model_dump())
         r = await http.post("/_remote", content=body,
                             headers={"Content-Type": "application/msgpack"})
         assert r.status_code == 200
         resp = unpack(r.content)
         assert resp["ok"] is False
-        assert resp["error"]["type"] == "PackageNotLoaded"
+        assert resp["error"]["type"] == "ModuleNotLoaded"
 
 
-async def test_remote_call_unknown_method_returns_error_body(
-    runtime_module, register_namespace,
+async def test_remote_call_unknown_function_returns_error_body(
+    runtime_module, register_target,
 ):
     server, _, _ = runtime_module
-    register_namespace(Echo)
+    register_target(Echo)
     from agentix.runtime.shared.codec import pack, unpack
     transport = httpx.ASGITransport(app=server.app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
         body = pack(RemoteRequest(
-            package=Echo.__module__, method="not_a_method",
+            target=f"{Echo.__module__}::not_a_function",
         ).model_dump())
         r = await http.post("/_remote", content=body,
                             headers={"Content-Type": "application/msgpack"})
         assert r.status_code == 200  # 200 with ok=False; wire stays clean
         resp = unpack(r.content)
         assert resp["ok"] is False
-        assert resp["error"]["type"] == "MethodNotFound"
+        assert resp["error"]["type"] == "FunctionNotFound"
 
 
 async def test_impl_exception_surfaces_as_remote_error(
-    runtime_module, register_namespace,
+    runtime_module, register_target,
 ):
     server, _, _ = runtime_module
-    register_namespace(Boom)
+    register_target(Boom)
     from agentix.runtime.shared.codec import pack, unpack
     transport = httpx.ASGITransport(app=server.app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
-        body = pack(RemoteRequest(package=Boom.__module__, method="go").model_dump())
+        body = pack(RemoteRequest(target=f"{Boom.__module__}::go").model_dump())
         r = await http.post("/_remote", content=body,
                             headers={"Content-Type": "application/msgpack"})
         assert r.status_code == 200
@@ -186,9 +196,9 @@ async def test_impl_exception_surfaces_as_remote_error(
 
 
 async def test_client_remote_round_trip(
-    runtime_module, register_namespace, live_server,
+    runtime_module, register_target, live_server,
 ):
-    register_namespace(Echo)
+    register_target(Echo)
     base_url = await live_server()
     async with RuntimeClient(base_url) as c:
         result = await c.remote(Echo.echo, msg="hello")
@@ -196,9 +206,9 @@ async def test_client_remote_round_trip(
 
 
 async def test_client_remote_raises_on_impl_error(
-    runtime_module, register_namespace, live_server,
+    runtime_module, register_target, live_server,
 ):
-    register_namespace(Boom)
+    register_target(Boom)
     base_url = await live_server()
     async with RuntimeClient(base_url) as c:
         with pytest.raises(RemoteCallError):
@@ -209,19 +219,61 @@ async def test_client_remote_raises_on_impl_error(
 
 
 async def test_stream_round_trip_via_socketio(
-    runtime_module, register_namespace, live_server,
+    runtime_module, register_target, live_server,
 ):
-    register_namespace(Streamer)
+    register_target(Streamer)
     base_url = await live_server()
     async with RuntimeClient(base_url) as c:
         items = [t async for t in c.remote(Streamer.chat, prompt="hi", n=2)]
         assert items == [Token(text="hi-0", idx=0), Token(text="hi-1", idx=1)]
 
 
-async def test_bidi_round_trip_via_socketio(
-    runtime_module, register_namespace, live_server,
+async def test_stream_call_context_uses_routable_call_id(
+    runtime_module, register_target, live_server,
 ):
-    register_namespace(Chat)
+    register_target(Streamer)
+    base_url = await live_server()
+    async with RuntimeClient(base_url) as c:
+        with c.call_context(call_id="ctx-stream"):
+            items = [t async for t in c.remote(Streamer.chat, prompt="ctx", n=1)]
+    assert items == [Token(text="ctx-0", idx=0)]
+
+
+async def test_socketio_cancel_gets_cancelled_error_ack(
+    runtime_module, register_target, live_server,
+):
+    register_target(SlowStream)
+    base_url = await live_server()
+
+    sio = socketio.AsyncClient()
+    errors: asyncio.Queue = asyncio.Queue()
+
+    async def _on_error(data):
+        await errors.put(unpack(data))
+
+    sio.on(STREAM_ERROR, _on_error)
+    await sio.connect(base_url)
+    try:
+        call_id = "cancel-me"
+        await sio.emit(STREAM, pack({
+            "call_id": call_id,
+            "target": f"{SlowStream.__module__}::ticks",
+        }))
+        await asyncio.sleep(0.05)
+        await sio.emit(CANCEL, pack({"call_id": call_id}))
+        payload = await asyncio.wait_for(errors.get(), timeout=5)
+    finally:
+        await sio.disconnect()
+
+    assert payload["call_id"] == "cancel-me"
+    assert payload["error"]["type"] == "Cancelled"
+    assert payload["error"]["cancelled"] is True
+
+
+async def test_bidi_round_trip_via_socketio(
+    runtime_module, register_target, live_server,
+):
+    register_target(Chat)
     base_url = await live_server()
 
     inbox: Channel[UserMsg] = Channel()
@@ -239,9 +291,9 @@ async def test_bidi_round_trip_via_socketio(
 
 
 async def test_bidi_accepts_positional_channel_arg(
-    runtime_module, register_namespace, live_server,
+    runtime_module, register_target, live_server,
 ):
-    register_namespace(Chat)
+    register_target(Chat)
     base_url = await live_server()
 
     inbox: Channel[UserMsg] = Channel()
@@ -258,12 +310,12 @@ async def test_bidi_accepts_positional_channel_arg(
 
 
 async def test_bidi_backpressure_no_drops_under_slow_consumer(
-    runtime_module, register_namespace, live_server,
+    runtime_module, register_target, live_server,
 ):
     """Producer sends N items > worker's _BIDI_USER_BUFFER while the impl
     yields slowly. With the per-call pump + bounded user queue, every
     item must reach the impl — no silent drops."""
-    register_namespace(SlowEcho)
+    register_target(SlowEcho)
     base_url = await live_server()
 
     n = 150  # well past _BIDI_USER_BUFFER=64
@@ -287,9 +339,9 @@ async def test_bidi_backpressure_no_drops_under_slow_consumer(
 
 @pytest.mark.skip(reason="log forwarding fixture timing flake; tracked separately")
 async def test_logs_subscription_receives_emitted_log(
-    runtime_module, register_namespace, live_server,
+    runtime_module, register_target, live_server,
 ):
-    register_namespace(Talker)
+    register_target(Talker)
     base_url = await live_server()
     async with RuntimeClient(base_url) as c:
         seen: list[str] = []

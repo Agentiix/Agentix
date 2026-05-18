@@ -1,54 +1,27 @@
-"""Per-package worker — `python -m agentix.runtime.server.worker --target <pkg>`.
+"""Runtime worker subprocess.
 
-A worker is a single-package dispatch process the multiplexer spawns
-lazily on first call. It loads ONE Python target (module or
-`module:attr`), wraps it in a `Dispatcher`, and serves dispatch over
-stdin/stdout using the length-prefixed frame protocol in
-`agentix.runtime.shared.framing`.
-
-The worker holds:
-
-  - one `Dispatcher` (lazily binds methods on first call)
-  - one asyncio task per in-flight call, keyed by `call_id`
-  - one input queue per in-flight bidi call (for `bidi_in` chunks)
-
-Logs go through Python's `logging` to stderr; the multiplexer's
-subprocess pipe captures them.
+The worker imports requested modules dynamically and runs remote calls
+over stdin/stdout using length-prefixed msgpack frames.
 """
 
 from __future__ import annotations
 
-import argparse
 import asyncio
 import importlib
-import inspect
+import importlib.util
 import logging
 import sys
 import traceback
 from typing import Any
 
-from agentix.dispatch import Dispatcher
+from agentix.invoke import FunctionInvoker
 from agentix.runtime.shared import frames as F
 from agentix.runtime.shared import pump as _pump
 from agentix.runtime.shared.framing import read_frame, write_frame
-from agentix.runtime.shared.idents import CallId, PackageName
+from agentix.runtime.shared.idents import CallId, TargetName
 from agentix.runtime.shared.models import RemoteError, RemoteRequest
 
 logger = logging.getLogger("agentix.runtime.server.worker")
-
-
-def _load_target(target: str) -> Any:
-    """Resolve `target` to a Python object.
-
-    Two forms (setuptools entry-point grammar):
-      * `module.path`        → the module itself
-      * `module.path:attr`   → `getattr(module, attr)` — a class or any obj
-    """
-    if ":" in target:
-        mod_name, attr_name = target.split(":", 1)
-        mod = importlib.import_module(mod_name)
-        return getattr(mod, attr_name)
-    return importlib.import_module(target)
 
 
 def _err(exc: BaseException) -> dict[str, Any]:
@@ -59,28 +32,19 @@ def _err(exc: BaseException) -> dict[str, Any]:
     ).model_dump()
 
 
+def _module_not_loaded(module: str) -> dict[str, Any]:
+    return RemoteError(
+        type="ModuleNotLoaded",
+        message=f"module not importable in the runtime venv: {module!r}",
+    ).model_dump()
+
+
 class Worker:
-    """One worker, one target. Owns stdio + a Dispatcher.
+    """One process serving all importable modules in the runtime venv."""
 
-    All outbound frames (result, stream item/end, error, ready) funnel
-    through `_outbound_q` and are serialized by a single drainer task.
-    Result: FIFO ordering, no send-lock contention.
-    """
-
-    def __init__(self, dispatcher: Dispatcher, package: str) -> None:
-        self._dispatcher = dispatcher
-        self._package = package
+    def __init__(self) -> None:
+        self._invokers: dict[str, FunctionInvoker] = {}
         self._calls: dict[str, asyncio.Task] = {}
-        # Bidi inbound path is two-tier so the main read loop never blocks
-        # on a slow impl: `_bidi_intakes[cid]` is unbounded (drained from
-        # the main loop with `put_nowait`); a per-call `_bidi_pumps[cid]`
-        # task moves items from intake into the bounded `_bidi_queues[cid]`
-        # that the impl reads from. The bounded user queue is what gives
-        # backpressure — when full, the pump's `await put` blocks, the
-        # intake grows briefly, OS pipe fills, multiplexer's stdin write
-        # blocks, Socket.IO emit backs up, ultimately the caller's
-        # `Channel.send()` awaits. CANCEL frames bypass all this via
-        # the main read loop.
         self._bidi_queues: dict[str, asyncio.Queue] = {}
         self._bidi_intakes: dict[str, asyncio.Queue] = {}
         self._bidi_pumps: dict[str, asyncio.Task] = {}
@@ -103,7 +67,7 @@ class Worker:
         self._reader, self._writer = reader, writer
 
         self._drainer = loop.create_task(self._drain_outbound())
-        await self._send({"type": F.READY, "package": self._package})
+        await self._send({"type": F.READY})
 
         while not self._shutdown.is_set():
             try:
@@ -139,6 +103,17 @@ class Worker:
     async def _send(self, payload: dict[str, Any]) -> None:
         await self._outbound_q.put(payload)
 
+    def _invoker_for(self, module_name: str) -> FunctionInvoker:
+        cached = self._invokers.get(module_name)
+        if cached is not None:
+            return cached
+        if importlib.util.find_spec(module_name) is None:
+            raise ModuleNotFoundError(module_name)
+        module = importlib.import_module(module_name)
+        invoker = FunctionInvoker(module)
+        self._invokers[module_name] = invoker
+        return invoker
+
     _RUNTIME_FRAME_HANDLERS: dict[str, str] = {
         F.CALL: "_on_call",
         F.BIDI_IN: "_on_bidi_in",
@@ -164,8 +139,7 @@ class Worker:
         call_id = frame.get("call_id", "")
         kind = frame.get("kind", F.KIND_UNARY)
         request = RemoteRequest(
-            package=PackageName(self._package),
-            method=frame["method"],
+            target=TargetName(frame["target"]),
             args=frame.get("args") or [],
             kwargs=frame.get("kwargs") or {},
             call_id=CallId(call_id) if call_id else None,
@@ -185,8 +159,12 @@ class Worker:
             task = asyncio.create_task(self._run_bidi(call_id, request, user_q))
         else:
             await self._send({
-                "type": F.ERROR, "call_id": call_id,
-                "error": RemoteError(type="BadFrame", message=f"unknown call kind {kind!r}").model_dump(),
+                "type": F.ERROR,
+                "call_id": call_id,
+                "error": RemoteError(
+                    type="BadFrame",
+                    message=f"unknown call kind {kind!r}",
+                ).model_dump(),
             })
             return
         self._calls[call_id] = task
@@ -194,8 +172,6 @@ class Worker:
         task.add_done_callback(lambda _t, cid=call_id: self._cleanup_bidi(cid))
 
     async def _forward_stream_event(self, call_id: str, event: dict[str, Any]) -> bool:
-        """Map a Dispatcher stream/bidi event to its wire frame; return True
-        if the event was terminal (caller should stop iterating)."""
         kind = event.get("type")
         if kind == "item":
             await self._send({"type": F.STREAM_ITEM, "call_id": call_id, "value": event["value"]})
@@ -208,9 +184,22 @@ class Worker:
             return True
         return False
 
-    async def _run_unary(self, call_id: str, request: RemoteRequest) -> None:
+    def _invoker_or_error(self, request: RemoteRequest) -> tuple[FunctionInvoker | None, dict[str, Any] | None]:
         try:
-            resp = await self._dispatcher.dispatch(request)
+            return self._invoker_for(request.module), None
+        except ModuleNotFoundError:
+            return None, _module_not_loaded(request.module)
+        except Exception as exc:
+            return None, _err(exc)
+
+    async def _run_unary(self, call_id: str, request: RemoteRequest) -> None:
+        invoker, err = self._invoker_or_error(request)
+        if err is not None:
+            await self._send({"type": F.ERROR, "call_id": call_id, "error": err})
+            return
+        assert invoker is not None
+        try:
+            resp = await invoker.call_unary(request)
         except Exception as exc:
             await self._send({"type": F.ERROR, "call_id": call_id, "error": _err(exc)})
             return
@@ -221,8 +210,13 @@ class Worker:
                               "error": (resp.error or RemoteError(type="Unknown", message="")).model_dump()})
 
     async def _run_stream(self, call_id: str, request: RemoteRequest) -> None:
+        invoker, err = self._invoker_or_error(request)
+        if err is not None:
+            await self._send({"type": F.ERROR, "call_id": call_id, "error": err})
+            return
+        assert invoker is not None
         try:
-            async for event in self._dispatcher.dispatch_stream(request):
+            async for event in invoker.call_stream(request):
                 if await self._forward_stream_event(call_id, event):
                     return
             await self._send({"type": F.STREAM_END, "call_id": call_id})
@@ -230,7 +224,12 @@ class Worker:
             await self._send({"type": F.ERROR, "call_id": call_id, "error": _err(exc)})
 
     async def _run_bidi(self, call_id: str, request: RemoteRequest, in_q: asyncio.Queue) -> None:
-        adapter = self._dispatcher.input_adapter_for(request.method)
+        invoker, err = self._invoker_or_error(request)
+        if err is not None:
+            await self._send({"type": F.ERROR, "call_id": call_id, "error": err})
+            return
+        assert invoker is not None
+        adapter = invoker.input_adapter_for(request.function)
 
         async def _input_iter():
             while True:
@@ -246,14 +245,13 @@ class Worker:
                 yield item
 
         try:
-            async for event in self._dispatcher.dispatch_bidi(request, _input_iter()):
+            async for event in invoker.call_bidi(request, _input_iter()):
                 if await self._forward_stream_event(call_id, event):
                     return
             await self._send({"type": F.STREAM_END, "call_id": call_id})
         except Exception as exc:
             await self._send({"type": F.ERROR, "call_id": call_id, "error": _err(exc)})
         finally:
-            # Unblock the input iterator if the impl exited early.
             try:
                 in_q.put_nowait(_END_SENTINEL)
             except asyncio.QueueFull:
@@ -282,36 +280,22 @@ class Worker:
         task = self._calls.get(call_id)
         if task is not None:
             task.cancel()
+            asyncio.create_task(self._send({
+                "type": F.ERROR,
+                "call_id": call_id,
+                "error": RemoteError(
+                    type="Cancelled",
+                    message="remote call cancelled",
+                    cancelled=True,
+                ).model_dump(),
+            }))
 
 
-# Module-level singleton used to signal "end of bidi input" through the
-# input queue. Compared with `is`; the same object reference must be
-# visible from `_on_bidi_end_in` (pusher), `_pump.drain` (forwarder), and
-# `_run_bidi` (consumer).
 _END_SENTINEL: Any = object()
 
 
-def _make_dispatcher(target: str) -> tuple[Dispatcher, str]:
-    obj = _load_target(target)
-    dispatcher = Dispatcher(obj)
-    # Routing key: the module the target lives in. For a bare-module
-    # target the module IS the object; for `module:attr` we take the
-    # module path so caller-side `fn.__module__` matches.
-    package = obj.__name__ if inspect.ismodule(obj) else obj.__module__
-    return dispatcher, package
-
-
-async def _amain(target: str) -> None:
-    try:
-        dispatcher, package = _make_dispatcher(target)
-    except Exception as exc:
-        # Worker hasn't initialized stdio framing yet; bootstrap a minimal
-        # writer so the multiplexer learns why we're exiting.
-        from agentix.runtime.shared.framing import pack_frame
-        sys.stdout.buffer.write(pack_frame({"type": F.BOOT_ERROR, "error": _err(exc)}))
-        sys.stdout.buffer.flush()
-        sys.exit(1)
-    worker = Worker(dispatcher, package)
+async def _amain() -> None:
+    worker = Worker()
     await worker.run()
 
 
@@ -321,14 +305,8 @@ def main() -> None:
         stream=sys.stderr,
         format="%(asctime)s [%(name)s] %(message)s",
     )
-    parser = argparse.ArgumentParser(prog="agentix.runtime.server.worker")
-    parser.add_argument(
-        "--target", required=True,
-        help="module to load — `module.path` (recommended) or `module.path:attr`",
-    )
-    args = parser.parse_args()
     try:
-        asyncio.run(_amain(args.target))
+        asyncio.run(_amain())
     except KeyboardInterrupt:
         pass
 

@@ -7,8 +7,8 @@ clients send bytes, server receives bytes, vice versa.
 Wire (Socket.IO event names + payload dicts):
 
   client → server:
-    "stream"       {call_id, package, method, args, kwargs}
-    "bidi:start"   {call_id, package, method, args, kwargs}
+    "stream"       {call_id, target, args, kwargs}
+    "bidi:start"   {call_id, target, args, kwargs}
     "bidi:in"      {call_id, item}
     "bidi:end_in"  {call_id}
     "cancel"       {call_id}
@@ -34,7 +34,7 @@ from typing import Any
 import socketio
 from pydantic import ValidationError
 
-from agentix.runtime.server.multiplexer import NamespaceMultiplexer
+from agentix.runtime.server.worker_client import RuntimeWorkerClient
 from agentix.runtime.shared import pump as _pump
 from agentix.runtime.shared.codec import pack, unpack
 from agentix.runtime.shared.events import (
@@ -71,11 +71,12 @@ class _CallState:
     in `agentix.runtime.server.worker`): `intake` is unbounded so
     `on_bidi_in` is a sync `put_nowait` — no await, no reordering even
     under `async_handlers=True`. A per-call `pump` task drains intake
-    into the bounded `in_queue` that the dispatcher's `_input_iter`
-    reads from; the pump's `await put` is what gives backpressure
+    into the bounded `in_queue` read by the worker call; the pump's
+    `await put` is what gives backpressure
     through the wire."""
 
     task: asyncio.Task
+    error_event: str
     intake: asyncio.Queue | None = None
     in_queue: asyncio.Queue | None = None
     pump: asyncio.Task | None = None
@@ -91,9 +92,9 @@ class _SessionState:
 
 
 def make_sio(
-    multiplexer: NamespaceMultiplexer,
+    worker: RuntimeWorkerClient,
 ) -> tuple[socketio.AsyncServer, socketio.ASGIApp]:
-    """Build the Socket.IO AsyncServer wired to `multiplexer`, plus its ASGI app."""
+    """Build the Socket.IO AsyncServer wired to the runtime worker."""
 
     # `async_handlers=True` (the default) spawns one task per event, so
     # CANCEL can interrupt an in-flight bidi flow even if BIDI_IN
@@ -146,7 +147,7 @@ def make_sio(
         async def _drive() -> None:
             try:
                 request = RemoteRequest(
-                    package=payload["package"], method=payload["method"],
+                    target=payload["target"],
                     args=payload.get("args") or [],
                     kwargs=payload.get("kwargs") or {},
                     call_id=CallId(call_id),
@@ -157,7 +158,7 @@ def make_sio(
                     "error": RemoteError(type=type(exc).__name__, message=str(exc)).model_dump(),
                 }), to=sid)
                 return
-            async for ev in multiplexer.dispatch_stream(request):
+            async for ev in worker.call_stream(request):
                 kind = ev.get("type")
                 if kind == "item":
                     await sio.emit(STREAM_ITEM, pack({"call_id": call_id, "value": ev.get("value")}), to=sid)
@@ -185,7 +186,7 @@ def make_sio(
 
         try:
             request = RemoteRequest(
-                package=payload["package"], method=payload["method"],
+                target=payload["target"],
                 args=payload.get("args") or [],
                 kwargs=payload.get("kwargs") or {},
                 call_id=CallId(call_id),
@@ -209,7 +210,7 @@ def make_sio(
                 yield item
 
         async def _drive() -> None:
-            async for ev in multiplexer.dispatch_bidi(request, _input_iter()):
+            async for ev in worker.call_bidi(request, _input_iter()):
                 kind = ev.get("type")
                 if kind == "item":
                     await sio.emit(BIDI_OUT, pack({"call_id": call_id, "value": ev.get("value")}), to=sid)
@@ -221,6 +222,7 @@ def make_sio(
         pump_task = asyncio.create_task(_pump.drain(intake, in_queue, sentinel))
         call_state = _CallState(
             task=None,                  # type: ignore[arg-type]  filled in by _spawn_call
+            error_event=BIDI_ERROR,
             intake=intake,
             in_queue=in_queue,
             pump=pump_task,
@@ -270,6 +272,14 @@ def make_sio(
         if call is not None:
             call.task.cancel()
             _pump.cancel_if_running(call.pump)
+            await sio.emit(call.error_event, pack({
+                "call_id": call_id,
+                "error": RemoteError(
+                    type="Cancelled",
+                    message="remote call cancelled",
+                    cancelled=True,
+                ).model_dump(),
+            }), to=sid)
 
     # ── helpers (closure over sio + sessions) ────────────────────
 
@@ -278,14 +288,14 @@ def make_sio(
     ) -> None:
         task = asyncio.create_task(coro)
         if state is None:
-            state = _CallState(task=task)
+            state = _CallState(task=task, error_event=STREAM_ERROR)
         else:
             state.task = task
         sess.calls[call_id] = state
 
         def _on_done(_t: asyncio.Task) -> None:
             popped = sess.calls.pop(call_id, None)
-            # Pump task outlives the dispatch task only until the next item
+            # Pump task outlives the call task only until the next item
             # arrives at intake. Cancel it explicitly so it doesn't sit
             # idle waiting on an intake that will never get more frames.
             if popped is not None:

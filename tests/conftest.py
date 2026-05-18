@@ -1,10 +1,8 @@
 """Shared fixtures for agentix tests.
 
-Production dispatch auto-registers any importable module on first
-call. Tests bypass that and inject classes directly via
-`multiplexer._register_inprocess()` so the in-process Dispatcher path
-exercises the wire protocol (Socket.IO + /_remote) without needing
-real subprocess workers.
+Production remote calls import modules inside a worker process. Protocol
+tests can instead inject classes directly into an in-process worker so
+they exercise Socket.IO and `/_remote` without subprocess stdio.
 """
 
 from __future__ import annotations
@@ -37,8 +35,8 @@ def runtime_module(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     upload_root.mkdir()
     monkeypatch.setenv("AGENTIX_UPLOAD_ROOT", str(upload_root))
 
-    # Reload server modules so each test gets a fresh multiplexer (no
-    # cross-test registration leakage). Order matters: leaves first,
+    # Reload server modules so each test gets a fresh worker client (no
+    # cross-test target leakage). Order matters: leaves first,
     # package __init__ last.
     for mod in (
         "agentix.runtime.server.sio",
@@ -56,21 +54,20 @@ def runtime_module(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.fixture
-def register_namespace(runtime_module) -> Callable[..., None]:
-    """Inject a namespace class into the runtime's multiplexer in-process.
+def register_target(runtime_module) -> Callable[..., None]:
+    """Inject a test target into the runtime worker in-process.
 
     Usage:
-        register_namespace(Echo)
+        register_target(Echo)
 
-    The class's `__module__` is the routing key. The multiplexer binds
-    it via Dispatcher and dispatches synchronously (no subprocess) —
-    same code path as a real subprocess worker would take, just skipping
-    the venv + stdio plumbing.
+    The class's `__module__` is the routing key. The worker client binds
+    it in-process and calls synchronously, skipping subprocess
+    stdio plumbing for protocol tests.
     """
     server, _, _ = runtime_module
 
     def _register(cls: type) -> None:
-        server.multiplexer._register_inprocess(cls)
+        server.worker._register_inprocess(cls)
 
     return _register
 
@@ -78,8 +75,7 @@ def register_namespace(runtime_module) -> Callable[..., None]:
 @pytest.fixture(autouse=True)
 def _purge_test_modules():
     """Per-test cleanup: drop any test-injected modules so the next test
-    starts with a fresh slate. Real installed namespaces (agentix.bash,
-    agentix.files) stay loaded — they're framework-level.
+    starts with a fresh slate. Real installed modules stay loaded.
     """
     yield
     # Test fixtures may have stashed temporary modules under arbitrary names.
@@ -96,7 +92,7 @@ async def live_server(runtime_module):
     serving the runtime's combined FastAPI+Socket.IO ASGI app.
 
     Test order:
-        1. register_namespace(...)        # populate the registry
+        1. register_target(...)        # register in-process test targets
         2. base_url = await start()     # uvicorn starts
         3. connect via RuntimeClient(base_url) etc.
 

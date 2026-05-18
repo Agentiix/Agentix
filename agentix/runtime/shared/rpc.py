@@ -10,7 +10,7 @@ one-liner:
     async for reply in c.remote(chat.chat, inbox=ch, opts=opts):  # Bidi
         ch.send(...)
 
-For generic dispatch over any shape, `match` on the variant:
+For generic handling over any shape, `match` on the variant:
 
     match c.remote(fn, ...):
         case Unary(_) as u: result = await u
@@ -38,7 +38,7 @@ R = TypeVar("R")
 
 def is_channel_annotation(ann: Any) -> bool:
     """True if `ann` is `Channel` or `Channel[T]`. The marker that
-    `agentix.dispatch.detect_shape` and `RuntimeClient.remote` use to
+    `agentix.invoke.detect_shape` and `RuntimeClient.remote` use to
     distinguish bidi from stream."""
     return ann is Channel or get_origin(ann) is Channel
 
@@ -51,9 +51,9 @@ _CHANNEL_CLOSED: Any = object()
 class Channel(AsyncIterator[In], Generic[In]):
     """User-pushed async channel for bidi inputs.
 
-    Satisfies `AsyncIterator[I]` — `Channel[T]` as a bidi method's
+    Satisfies `AsyncIterator[I]` — `Channel[T]` as a bidi function's
     parameter annotation is what marks the call as bidi (see
-    `agentix.dispatch.detect_shape`). The caller pushes items with
+    `agentix.invoke.detect_shape`). The caller pushes items with
     `await ch.send(item)`; `await ch.close()` signals end-of-input.
     Items are delivered FIFO. `maxsize` bounds the local buffer;
     when full, `.send()` awaits until consumers (the framework's
@@ -110,7 +110,7 @@ class Bidi(Generic[In, R]):
     """Bidirectional remote call. Push to `inbox`, `async for` for outputs.
 
     `inbox` is the same `Channel[In]` the caller passed to `c.remote`;
-    storing it here lets generic match-based dispatch reach it without
+    storing it here lets generic match-based handling reach it without
     needing the original variable.
     """
 

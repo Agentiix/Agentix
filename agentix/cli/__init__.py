@@ -1,13 +1,13 @@
-"""`agentix` command-line interface — hardcoded subcommand dispatch.
+"""`agentix` command-line interface.
 
 Two built-in subcommands (`build`, `deploy`) ship as modules under
 `agentix/cli/`. Third parties that want to add a new `agentix <name>`
 verb should expose their own `console_scripts` entry instead — the
 central CLI is not a plugin surface.
 
-The dispatcher deliberately doesn't use argparse subparsers — argparse
+The CLI deliberately doesn't use argparse subparsers — argparse
 intercepts `--help` greedily at the root level, so `agentix build --help`
-would never reach `build`'s parser. Manual dispatch keeps each
+would never reach `build`'s parser. Manual routing keeps each
 subcommand's `--help` intact.
 """
 

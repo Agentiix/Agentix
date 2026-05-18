@@ -1,6 +1,6 @@
 ---
 title: Quick start
-description: Install Agentix, deploy a rollout container, and call a sandboxed namespace from Python.
+description: Install Agentix, deploy a rollout container, and call sandboxed Python from the host.
 ---
 
 ## Prerequisites
@@ -9,19 +9,19 @@ description: Install Agentix, deploy a rollout container, and call a sandboxed n
 - Docker (for the `local` deployment)
 
 This quickstart proves the smallest Agentix bridge: host-side Python
-calls a sandboxed namespace as if it were a local typed function.
+calls a sandboxed module as if it were a local typed function.
 
 ## Install
 
 <Tabs>
   <Tab title="pip">
     ```bash
-    pip install agentix agentix-runtime-basic agentix-deployment-docker
+    pip install agentixx agentix-runtime-basic agentix-deployment-docker
     ```
   </Tab>
   <Tab title="uv">
     ```bash
-    uv add agentix agentix-runtime-basic agentix-deployment-docker
+    uv add agentixx agentix-runtime-basic agentix-deployment-docker
     ```
   </Tab>
   <Tab title="From source">
@@ -33,23 +33,13 @@ calls a sandboxed namespace as if it were a local typed function.
   </Tab>
 </Tabs>
 
-## Verify
-
-```bash
-agentix check
-```
-
-```text
-OK   bash    agentix.bash    agentix-runtime-basic@0.1.0
-OK   files   agentix.files   agentix-runtime-basic@0.1.0
-```
-
-## Call a namespace
+## Call a module
 
 ```python title="hello_sandbox.py"
 import asyncio
-from agentix import RuntimeClient, SandboxConfig, bash
-from agentix.deployment.base import session
+from agentix import RuntimeClient
+from agentix.bash import run
+from agentix.deployment.base import SandboxConfig, session
 from agentix.deployment.docker import DockerDeployment
 
 async def main():
@@ -57,7 +47,7 @@ async def main():
     config = SandboxConfig(image="my-bash:0.1.0")   # produced by `agentix build path/to/my-project`
     async with session(deployment, config) as sandbox:
         async with RuntimeClient(sandbox.runtime_url) as c:
-            r = await c.remote(bash.run, command="echo hi")
+            r = await c.remote(run, command="echo hi")
             print(r.stdout)   # → "hi\n"
 
 asyncio.run(main())
@@ -71,7 +61,7 @@ python hello_sandbox.py
 First run pulls the bundle image (~30 s). Subsequent sandboxes start
 in ~100 ms.
 
-## Write your own namespace
+## Write your own target
 
 <Tabs>
   <Tab title="Source">
@@ -86,19 +76,16 @@ in ~100 ms.
     name = "agentix-myagent"
     version = "0.1.0"
 
-    [project.entry-points."agentix.namespace"]
-    myagent = "agentix.myagent"
-
     [tool.hatch.build.targets.wheel]
     packages = ["src/agentix"]
     ```
   </Tab>
   <Tab title="Layout">
     ```text
-    my-namespace/
+    my-agent/
     ├── pyproject.toml
     └── src/
-        └── agentix/                  # PEP 420 namespace package, no __init__.py
+        └── agentix/
             └── myagent/
                 └── __init__.py
     ```
@@ -106,7 +93,7 @@ in ~100 ms.
 </Tabs>
 
 ```bash
-agentix build ./my-namespace                       # → myagent:0.1.0
+agentix build ./my-agent                           # → myagent:0.1.0
 agentix deploy local --image myagent:0.1.0
 ```
 
@@ -114,20 +101,20 @@ Bundling several plugins? Declare them in a project's `pyproject.toml`
 under `[project].dependencies` and `agentix build` that project — pip
 resolves transitively.
 
-`pip install agentix-myagent` is everything your users need. The
-framework discovers the entry point, and
+`pip install agentix-myagent` is everything your users need.
 `from agentix.myagent import run` resolves natively in their code.
+`c.remote(run, ...)` sends `agentix.myagent::run` to the runtime.
 
 ## Next
 
 <CardGroup cols={2}>
   <Card title="Integrate an agent" icon="robot" href="/integrate-agent">
-    Wrap an agent CLI as a namespace.
+    Wrap an agent CLI as a Python module.
   </Card>
   <Card title="Architecture" icon="sitemap" href="/reference/architecture">
-    Dispatcher, runtime, wire patterns.
+    Bundle dependencies, remote calls, worker process.
   </Card>
   <Card title="CLI reference" icon="terminal" href="/reference/cli">
-    `agentix build`, `deploy`, `check`.
+    `agentix build`, `deploy`.
   </Card>
 </CardGroup>

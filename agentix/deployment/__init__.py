@@ -1,11 +1,9 @@
-"""Deployment axis — Protocol + backend-discovery.
+"""Deployment Protocol + backend discovery.
 
-`agentix.deployment` is an extensible namespace: core ships the
-`Deployment` Protocol + `Sandbox` dataclass + the `_plugin.Registry`
-loader; backend wheels (`agentix-deployment-docker`,
-`-daytona`, `-e2b`, third-party) each install a single sibling module
-into `<site-packages>/agentix/deployment/<backend>.py`. The
-`pkgutil.extend_path` line below is what lets those siblings co-exist
+Core ships the `Deployment` Protocol, `Sandbox` dataclass, and backend
+registry. Backend wheels (`agentix-deployment-docker`, `-daytona`,
+`-e2b`, third-party) each install a sibling module under
+`agentix.deployment`; extending `__path__` lets those siblings co-exist
 with the framework files in this directory.
 """
 

@@ -1,118 +1,139 @@
 ---
 title: Architecture
-description: How RPC dispatch and the runtime server fit together.
+description: How bundle dependencies and remote calls fit together.
 ---
 
-## Components
+Agentix has two core pieces:
 
-```text
-┌─ Host (orchestrator) ─────────────────────────────────────────┐
-│  RuntimeClient                                                 │
-│    • remote(fn, *args, **kwargs)        (typed dispatch)       │
-│    • health()                                                  │
-└──────────────────────────────┬─────────────────────────────────┘
-                               │ HTTP (POST /_remote)
-                               │ Socket.IO (stream + bidi)
-┌─ Sandbox ────────────────────▼─────────────────────────────────┐
-│                                                                 │
-│  agentix-server (FastAPI + Socket.IO + multiplexer)            │
-│      POST /_remote   { package, method, args, kwargs }          │
-│      /socket.io/     stream + bidi multiplexed by call_id       │
-│      GET  /health                                               │
-│                                                                 │
-│  Workers: one subprocess per dispatched package, spawned        │
-│  lazily on first call using `/nix/runtime/bin/python`.          │
-│                                                                 │
-│  /nix/store — only present if the project shipped default.nix.  │
-└─────────────────────────────────────────────────────────────────┘
+1. **Bundle** builds one runtime image containing user code,
+   integrations, Python dependencies, and optional system binaries.
+2. **Remote calls** run installed functions inside that image with
+   `RuntimeClient.remote(fn, ...)`.
+
+Bundle decides what code exists in the sandbox. `client.remote(fn, ...)`
+chooses which installed function to call.
+
+## User Model
+
+Pass a normal imported function:
+
+```python
+from agentix import RuntimeClient
+from app import run
+
+async with RuntimeClient(sandbox.runtime_url) as client:
+    result = await client.remote(run, input="hello")
 ```
 
-Routing is by `fn.__module__`. On first call to a package not seen
-before, the multiplexer probes the runtime's Python for whether the
-module imports there; on match it spawns a worker. There is no
-entry-point declaration required — any importable Python module is a
-valid dispatch target.
+Importing the module first also works:
 
-## Dispatch target
+```python
+import app
 
-```text
-my-project/
-├── pyproject.toml                 # any name, any layout
-└── src/my_project/
-    └── tasks.py                   # async def run(...): ...
-└── default.nix                    # OPTIONAL — system deps only
+result = await client.remote(app.run, input="hello")
 ```
 
-Routing is by module path: `c.remote(tasks.run, ...)` reads
-`tasks.run.__module__` as the routing key. `pip install -e .`
-followed by `agentix build .` puts everything in the bundle.
+## Bundle
 
-## Build pipeline
-
-`agentix build [path]` packages one project root into a deploy-ready
-bundle. Plugins arrive transitively via pip from the project's
-`[project].dependencies`; the CLI never enumerates them.
-
-1. **Optional Nix stage:** if the project ships `default.nix`, a
-   `nixos/nix` builder stage runs first; the derivation closure is
-   copied to `/export/nix/store`. Projects with no system deps skip
-   this stage.
-2. **One pip install:** `FROM agentix/runtime:<version>` (Python
-   3.11-slim + framework venv at `/nix/runtime/`). One
-   `pip install /src/project` resolves the user's project + every
-   declared `agentix-*` plugin into the same venv. If the project
-   shipped `default.nix`, its derivation's `bin/*` is symlinked into
-   `/nix/runtime/bin/`.
-
-The runtime image (`agentix/runtime:<version>`) is built once via
-`docker build -f ../Agentix-Runtime-Basic/runtime/Dockerfile .`.
-
-## Sandbox layout
-
-```text
-/                                  ← bundle image rootfs
-├── nix/
-│   ├── runtime/                   ← framework + every plugin + user code
-│   │   ├── bin/agentix-server     ← ENTRYPOINT; the multiplexer process
-│   │   ├── bin/python             ← every worker's interpreter
-│   │   ├── bin/claude             ← symlink → /nix/store/<hash>/bin/claude
-│   │   └── lib/python3.11/site-packages/
-│   │       ├── agentix/...        ← framework
-│   │       ├── agentix/bash/      ← from agentix-runtime-basic
-│   │       ├── agentix/claude_code/ ← from agentix-claude-code
-│   │       └── my_project/        ← user's project
-│   └── store/                     ← Nix store (only if default.nix shipped)
-│       ├── <hash>-claude-*/bin/claude
-│       └── <hash>-git-*/bin/git
-```
-
-ENTRYPOINT is `/nix/runtime/bin/agentix-server`, binding
-`AGENTIX_BIND_PORT`. One worker subprocess per dispatched module
-spawns from `/nix/runtime/bin/python`.
-
-## Environment & PATH policy
-
-Subprocess invocations:
-
-1. **Strip Nix-host-only env vars** — `LD_LIBRARY_PATH`, `LD_PRELOAD`,
-   `PYTHONPATH`, `PYTHONHOME`, `LOCALE_ARCHIVE`, `FONTCONFIG_*`,
-   `SSL_CERT_FILE`, anything prefixed `NIX_`.
-2. **PATH defaults to** `/usr/local/bin:/usr/bin:/bin`, with
-   `/nix/runtime/bin/` prepended for every worker so symlinked Nix
-   binaries (`claude`, `git`, …) resolve by bare name.
-3. **Nix-store paths** (`/nix/store/<hash>/bin/<tool>`) are stable
-   across the bundle's lifetime — content-addressed.
-
-## Deployment (Docker)
+`agentix build [path]` installs the project into the runtime venv:
 
 ```bash
-docker run -d \
-  --name <sandbox-id> \
-  --network host \
-  -e AGENTIX_BIND_PORT=<port> \
-  <bundle-image>
+/nix/runtime/bin/pip install --no-cache-dir /src/project
 ```
 
-The deployment picks a free host port, passes it via env, and
-health-checks `/health` before returning. The bundle image carries
-everything — no volume populate, no mount-and-merge.
+That install brings in the user project, direct dependencies,
+transitive dependencies, and integration modules declared in
+`pyproject.toml`.
+
+Runtime layout:
+
+```text
+/nix/runtime/
+├── bin/
+│   ├── python
+│   ├── pip
+│   └── agentix-server
+└── lib/python3.11/site-packages/
+    ├── agentix/
+    ├── agentix/bash/
+    ├── agentix/swebench/
+    └── app.py
+```
+
+If the project includes `default.nix`, `agentix build` adds a Nix
+builder stage and symlinks the derivation's `bin/*` into
+`/nix/runtime/bin/`. Worker subprocesses use:
+
+```text
+/nix/runtime/bin:/usr/local/bin:/usr/bin:/bin
+```
+
+## Remote Calls
+
+The client turns the function object into a target string:
+
+```python
+target = f"{fn.__module__}::{fn.__name__}"
+```
+
+Example:
+
+```python
+from agentix.swebench import run
+
+score = await client.remote(run, instance=inst, patch=patch)
+```
+
+Wire payload:
+
+```python
+{
+    "target": "agentix.swebench::run",
+    "args": [],
+    "kwargs": {"instance": inst, "patch": patch},
+}
+```
+
+The runtime worker imports `agentix.swebench` inside the sandbox and
+calls `run(...)`.
+
+Args, kwargs, return values, and stream items travel as msgpack payloads.
+The client uses the local function signature to encode inputs; the
+worker resolves the imported function signature and validates/coerces
+inputs before calling it.
+
+## Flow
+
+```text
+Host
+  RuntimeClient.remote(fn, ...)
+    read fn.__module__ and fn.__name__
+    build "module.path::function_name"
+    detect unary / stream / bidi
+    encode args and kwargs
+      |
+      v
+Sandbox
+  agentix-server
+      |
+      v
+Single runtime worker process
+  import module.path
+  call function_name(*args, **kwargs)
+```
+
+## Call Shapes
+
+| Function shape | Transport | Client usage |
+| --- | --- | --- |
+| normal async function | HTTP `POST /_remote` | `await client.remote(fn, ...)` |
+| async generator | Socket.IO stream | `async for item in client.remote(fn, ...)` |
+| async generator with `Channel[T]` input | Socket.IO bidi | send through `Channel`, receive with `async for` |
+
+## Mental Model
+
+```text
+Bundle = what code and dependencies exist in the sandbox
+client.remote(fn) = which installed function to call
+Worker = where the function executes
+```

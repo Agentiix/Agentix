@@ -13,8 +13,8 @@ dependencies = [
     "pydantic>=2.0",
     "python-multipart>=0.0.9",
     "httpx>=0.27",
-    # Streams, bidi, and log subscription multiplex over a single Socket.IO
-    # connection. The same package is both client and server.
+    # Streams, bidi, and log subscription share one Socket.IO connection.
+    # The same package is both client and server.
     "python-socketio[asyncio-client]>=5.11",
     # Wire codec — msgpack for all RPC frames + Socket.IO event payloads.
     # Cross-language, no base64 overhead, native bytes, extension types
@@ -37,10 +37,8 @@ agentix = "agentix.cli:main"
 # Runtime server entrypoint — the bundle image's Docker ENTRYPOINT.
 agentix-server = "agentix.runtime.server:main"
 
-# Deployment backends and namespace primitives ship in their own
-# wheels — each `pip install` registers its own entry points under
-# `agentix.deployment` / `agentix.namespace`. The framework discovers
-# them at startup; nothing here.
+# Deployment backends ship in their own wheels. Runtime integrations are
+# normal Python dependencies installed into the bundle.
 #   pip install agentix-deployment-docker   # registers `local`
 #   pip install agentix-deployment-daytona  # registers `daytona`
 #   pip install agentix-deployment-e2b      # registers `e2b`

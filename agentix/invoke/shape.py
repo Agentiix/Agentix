@@ -1,7 +1,7 @@
 """Call-shape detection — `unary` / `stream` / `bidi`.
 
 The framework's three call shapes are exhaustive; adding a fourth means
-editing `detect_shape` plus the matching branches in `Dispatcher` /
+editing `detect_shape` plus the matching branches in `FunctionInvoker` /
 `RuntimeClient`. No plugin extension hook — by design.
 """
 
@@ -14,7 +14,7 @@ from typing import Any, Literal
 from agentix.runtime.shared.rpc import is_channel_annotation
 
 Shape = Literal["unary", "stream", "bidi"]
-"""How a method's signature maps onto the wire:
+"""How a function's signature maps onto the wire:
 
   * `unary`  — plain `T` return; one request, one response
   * `stream` — `async def f(...) -> AsyncIterator[T]: yield ...`

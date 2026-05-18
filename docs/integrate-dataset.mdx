@@ -1,15 +1,15 @@
 ---
 title: Integrate a dataset
-description: Wrap a benchmark or evaluation harness (SWE-bench, MLE-Bench, …) as an Agentix namespace.
+description: Wrap a benchmark or evaluation harness (SWE-bench, MLE-Bench, ...) as a Python module.
 ---
 
-A **dataset** namespace scores model patches against a benchmark.
+A **dataset** module scores model patches against a benchmark.
 This guide uses SWE-bench Verified as the worked example.
 
 ```python
-from agentix import swebench
+from agentix.swebench import score
 
-s = await c.remote(swebench.score, instance=inst, patch=model_patch)
+s = await c.remote(score, instance=inst, patch=model_patch)
 ```
 
 ## 1. Source layout
@@ -24,7 +24,7 @@ agentix-swebench/
 
 ## 2. Method surface
 
-Keep the namespace narrow — one `score` method. Dataset enumeration
+Keep the module narrow: one `score` function. Dataset enumeration
 and repo materialisation belong on the caller side
 (`datasets.load_dataset(...)` + `bash.run` to clone).
 
@@ -70,16 +70,13 @@ See [`agentix-cookbook/swebench/swebench.py`](https://github.com/Agentiix/agenti
 for the complete implementation — it leans on the official `swebench`
 package for per-repo test specs, log parsers, and grading.
 
-## 3. Entry point + packaging
+## 3. Packaging
 
 ```toml title="pyproject.toml"
 [project]
 name = "agentix-swebench"
 version = "0.1.0"
 dependencies = ["swebench>=4.0"]
-
-[project.entry-points."agentix.namespace"]
-swebench = "agentix.swebench"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/agentix"]
@@ -100,13 +97,16 @@ SWE-bench's per-instance images for full reproducibility.
 
 ```python
 from datasets import load_dataset
-from agentix import RuntimeClient, bash, claude_code, swebench
+from agentix import RuntimeClient
+from agentix.bash import run as bash_run
+from agentix.claude_code import run as run_claude
+from agentix.swebench import score
 
 inst = dict(load_dataset("princeton-nlp/SWE-bench_Verified", split="test")[0])
 
 async with RuntimeClient(sandbox.runtime_url) as c:
     await c.remote(
-        bash.run,
+        bash_run,
         command=(
             f"rm -rf /testbed && "
             f"git clone https://github.com/{inst['repo']}.git /testbed && "
@@ -114,12 +114,12 @@ async with RuntimeClient(sandbox.runtime_url) as c:
         ),
     )
     cc = await c.remote(
-        claude_code.run, instruction=inst["problem_statement"],
+        run_claude, instruction=inst["problem_statement"],
         workdir="/testbed", env={"ANTHROPIC_API_KEY": api_key},
     )
     diff = await c.remote(
-        bash.run, command="cd /testbed && git add -A && git diff --cached",
+        bash_run, command="cd /testbed && git add -A && git diff --cached",
     )
-    s = await c.remote(swebench.score, instance=inst, patch=diff.stdout)
+    s = await c.remote(score, instance=inst, patch=diff.stdout)
     print("PASS" if s.resolved else "FAIL", s.fail_to_pass_missing)
 ```

@@ -1,7 +1,7 @@
 """Wire-frame type tags + call-kind tags for `agentix.runtime.shared.framing`.
 
 These are the values of the `type` (and `kind`) fields in msgpack frames
-flowing between the runtime multiplexer and namespace workers over
+flowing between the runtime server and worker subprocess over
 stdin/stdout. Keeping them in one place means a typo is an
 `AttributeError` at import time, not a silent protocol break at runtime.
 """

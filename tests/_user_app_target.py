@@ -1,11 +1,4 @@
-"""Stands in for a user's own module — NO entry-point declaration.
-
-Lives in tests/ so the worker subprocess can `import _user_app_target`
-after we add tests/ to PYTHONPATH. This module deliberately does NOT
-register under `agentix.namespace` anywhere — its presence in the
-multiplexer's routing table happens entirely through the on-demand
-auto-register path on first dispatch.
-"""
+"""Stands in for a user's own importable module."""
 
 from __future__ import annotations
 

@@ -1,6 +1,6 @@
 ---
 title: Development
-description: Local setup, daily workflow, and how to author a new namespace.
+description: Local setup, daily workflow, and how to author a remote function module.
 ---
 
 ## Prerequisites
@@ -28,10 +28,10 @@ agentix-server                 # http://localhost:8000
 agentix-server --port 9000
 ```
 
-Without any namespaces installed the server exposes its built-ins only
-(`/health`, `/exec`, `/upload`, `/download`). Useful for iterating on
-the runtime without the Docker round-trip; `pip install -e ../Agentix-Runtime-Basic`
-makes `agentix.bash:Bash` discoverable on the next start.
+The server exposes `/health` and `/_remote`; stream and bidi calls use
+`/socket.io/`. Useful for iterating on the runtime without the Docker
+round-trip; `pip install -e ../Agentix-Runtime-Basic` makes
+`agentix.bash` importable on the next start.
 
 ### Build the runtime image (once)
 
@@ -39,7 +39,7 @@ makes `agentix.bash:Bash` discoverable on the next start.
 docker build -t agentix/runtime:0.1.0 -f ../Agentix-Runtime-Basic/runtime/Dockerfile .
 ```
 
-This produces the base image every namespace bundle extends. Rebuild
+This produces the base image every bundle extends. Rebuild
 whenever the framework version bumps.
 
 ### Build a bundle from a project
@@ -59,17 +59,17 @@ arrive transitively via pip from your `[project].dependencies`.
 
 ```python
 import asyncio
-from agentix import RuntimeClient, SandboxConfig
-from agentix.deployment.base import session
+from agentix import RuntimeClient
+from agentix.deployment.base import SandboxConfig, session
 from agentix.deployment.docker import DockerDeployment
-from agentix.bash import Bash
+from agentix.bash import run
 
 async def main():
     deployment = DockerDeployment()
     config = SandboxConfig(image="my-sandbox:dev")
     async with session(deployment, config) as sb:
         async with RuntimeClient(sb.runtime_url) as c:
-            result = await c.remote(Bash.run, command="echo hi")
+            result = await c.remote(run, command="echo hi")
             print(result.stdout)
 
 asyncio.run(main())
@@ -83,29 +83,29 @@ pytest                      # unit tests
 pytest -x                   # stop on first failure
 ```
 
-## Adding a new namespace
+## Adding a remote function module
 
-A namespace is a normal Python project (whatever `uv init --lib`
-produces) with one entry-point declaration. The fastest path is to
-copy the template:
+A remote function module is a normal Python module installed into the
+bundle. The fastest path is to create a small package and expose async
+functions:
 
 ```bash
-cp -r ../Agentix-Runtime-Basic/runtime my-namespace
-# edit my-namespace/pyproject.toml (name, entry point)
-# edit my-namespace/src/agentix/<name>/__init__.py (your class)
-agentix build my-namespace
+mkdir -p my-agent/src/agentix/myagent
+# edit my-agent/pyproject.toml
+# edit my-agent/src/agentix/myagent/__init__.py
+agentix build my-agent
 ```
 
 Use it:
 
 ```python
-SandboxConfig(image="my-namespace:0.1.0")
+SandboxConfig(image="my-agent:0.1.0")
 ```
 
-If your namespace needs native binaries (claude CLI, git, libffi, …),
+If your target needs native binaries (claude CLI, git, libffi, ...),
 drop a `default.nix` next to its `pyproject.toml` declaring those deps;
 `agentix build` will splice in a Nix builder stage automatically.
 
 See the [architecture](/reference/architecture) reference for the full
-contract, and [the `bash` namespace in [`agentix-runtime-basic`](https://github.com/Agentiix/Agentix-Runtime-Basic)](https://github.com/Agentiix/Agentix/tree/master/../Agentix-Runtime-Basic)
+contract, and [`agentix-runtime-basic`](https://github.com/Agentiix/Agentix-Runtime-Basic)
 for a working in-tree example.

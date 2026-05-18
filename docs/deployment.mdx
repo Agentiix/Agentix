@@ -5,9 +5,10 @@ description: Host-side backend that provisions sandboxes — pick one with `agen
 
 A **deployment** is a host-side backend that provisions sandboxes. The
 user picks one with `agentix deploy <name> --image …`; in code, you
-instantiate the class and pass it to `session(...)`. Built-ins:
-`local` (Docker), `daytona`, `e2b`. `pip install agentix-deployment-*`
-adds another.
+instantiate the class and pass it to `session(...)`.
+`pip install agentix-deployment-docker` provides `local`; other
+backend packages provide their own names. `pip install
+agentix-deployment-*` adds another.
 
 ## Using one
 
@@ -20,8 +21,8 @@ adds another.
   </Tab>
   <Tab title="Code">
     ```python
-    from agentix import RuntimeClient, SandboxConfig
-    from agentix.deployment.base import session
+    from agentix import RuntimeClient
+    from agentix.deployment.base import SandboxConfig, session
     from agentix.deployment.docker import DockerDeployment
 
     deployment = DockerDeployment()
@@ -45,9 +46,7 @@ inheritance — the framework uses structural typing.
   <Tab title="Plugin source">
     ```python title="my_deploy/__init__.py"
     import os
-    from agentix.deployment.base import Sandbox
-    from agentix.idents import SandboxId
-    from agentix.models import SandboxConfig, SandboxInfo
+    from agentix.deployment.base import Sandbox, SandboxConfig, SandboxId, SandboxInfo
 
     class FlyDeployment:
         def __init__(self) -> None:

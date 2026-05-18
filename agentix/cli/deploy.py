@@ -12,7 +12,7 @@ defined so the CLI surface stabilizes; calling them surfaces a clear
 NotImplementedError pointing at the deploy roadmap.
 
 The `--image` is a deploy-ready bundle produced by `agentix build` —
-it carries the runtime + every namespace + any system deps in one
+it carries the runtime + every installed target + any system deps in one
 image. The deployment just runs it.
 
 By default the command stays in the foreground, prints the sandbox's
@@ -29,6 +29,7 @@ import logging
 import signal
 import sys
 from collections.abc import Sequence
+from typing import Any
 
 from agentix.deployment.base import Deployment, SandboxConfig, load_deployment, session
 
@@ -48,7 +49,7 @@ def _make_deployment(backend: str) -> Deployment:
     return cls()
 
 
-async def _run_async(backend: str, args: argparse.Namespace) -> int:
+async def _run_async(backend: str, args: Any) -> int:
     deployment = _make_deployment(backend)
     config = SandboxConfig(image=args.image)
     if args.detach:

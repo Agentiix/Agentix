@@ -1,12 +1,13 @@
 ---
 title: Integrate an agent
-description: Wrap an agent CLI (Claude Code, Aider, OpenHands, Codex …) as an Agentix namespace.
+description: Wrap an agent CLI (Claude Code, Aider, OpenHands, Codex ...) as a Python module.
 ---
 
-An **agent** in Agentix is a namespace whose method shells out to a
-CLI binary. The caller invokes `c.remote(claude_code.run, ...)`; the
-body — running inside the sandbox — execs the binary and returns a
-typed result.
+An **agent** in Agentix is a Python module whose function shells out to
+a CLI binary. The caller imports that function and invokes
+`c.remote(run, ...)`; the
+body, running inside the sandbox, execs the binary and returns a typed
+result.
 
 This guide ports `claude-code` as the worked example.
 
@@ -73,19 +74,16 @@ async def run(
     )
 ```
 
-The method body runs **inside the sandbox** — anything an
+The function body runs **inside the sandbox** — anything an
 `asyncio.create_subprocess_exec` call can do is fair game.
 
-## 3. Entry point + packaging
+## 3. Packaging
 
 ```toml title="pyproject.toml"
 [project]
 name = "agentix-claude-code"
 version = "0.1.0"
 requires-python = ">=3.11"
-
-[project.entry-points."agentix.namespace"]
-claude_code = "agentix.claude_code"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/agentix"]
@@ -98,11 +96,13 @@ packages = ["src/agentix"]
 ## 4. Extract the patch on the caller
 
 Patch extraction is a generic "what changed in this workdir"
-operation — keep it on the caller, not in the agent namespace:
+operation; keep it on the caller, not in the agent module:
 
 ```python
+from agentix.bash import run as bash_run
+
 diff = await c.remote(
-    bash.run,
+    bash_run,
     command=f"cd /testbed && git add -A && git diff --cached --no-color",
 )
 patch = diff.stdout
@@ -148,7 +148,9 @@ async def run_stream(instruction: str, **kwargs) -> AsyncIterator[TokenChunk | R
 Callers iterate without `await`:
 
 ```python
-async for ev in c.remote(claude_code.run_stream, instruction="…"):
+from agentix.claude_code import run_stream
+
+async for ev in c.remote(run_stream, instruction="…"):
     match ev:
         case TokenChunk(text=t): print(t, end="")
         case RunDone(result=r):  return r
@@ -166,4 +168,4 @@ for a working reference.
 - Pass API keys per call via `env={"ANTHROPIC_API_KEY": "..."}`. Don't
   bake them into the image.
 - Default `workdir=/testbed`. Most benchmarks mount the repo there.
-- Bound `timeout` aggressively. Long-running agents hang.
+- Bound `timeout` aggressively. Long-running agents can hang.

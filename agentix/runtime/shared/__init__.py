@@ -6,12 +6,12 @@ The runtime is split three ways:
     constants. Imported by both sides. No imports back into `client/`
     or `server/`.
   * `agentix.runtime.client`  — orchestrator-side `RuntimeClient`.
-  * `agentix.runtime.server`  — sandbox-side multiplexer, FastAPI
-    app, Socket.IO server, namespace worker subprocess.
+  * `agentix.runtime.server`  — sandbox-side FastAPI app, Socket.IO
+    server, and worker subprocess.
 
 Submodules in this package:
 
-  - `idents`   — branded NewType ids on the wire (CallId, PackageName, MethodName)
+  - `idents`   — branded NewType ids on the wire (CallId, TargetName)
   - `rpc`      — caller-side variants (`Channel`, `Unary`, `Stream`, `Bidi`)
   - `codec`    — msgpack pack/unpack + ext types (numpy, pydantic)
   - `events`   — Socket.IO event-name constants

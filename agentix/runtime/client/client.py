@@ -2,17 +2,17 @@
 
 `RuntimeClient.remote(fn, *args, **kwargs)` is the entire surface. `fn`
 is any importable Python function from a Python module installed in the
-sandbox; routing key is `fn.__module__`, result is decoded into `fn`'s
-return type. The framework's three call shapes (unary / stream / bidi)
-are detected from `fn`'s signature.
+sandbox. The client sends `fn.__module__ + "::" + fn.__name__`; the
+result is decoded into `fn`'s return type. The framework's three call
+shapes (unary / stream / bidi) are detected from `fn`'s signature.
 
 Two transports underneath:
   - HTTP for unary RPC (`POST /_remote`).
-  - Socket.IO for server-streaming + bidirectional dispatch.
+  - Socket.IO for server-streaming + bidirectional calls.
 
 The Socket.IO connection is lazy and shared across all stream/bidi
-calls on the same client. Per-`call_id` queue routing demultiplexes
-concurrent calls.
+calls on the same client. `call_id` routes each event to the right
+in-flight call.
 """
 
 from __future__ import annotations
@@ -27,6 +27,7 @@ from collections.abc import AsyncGenerator, Callable, Coroutine, Iterator, Mappi
 from contextlib import contextmanager
 from typing import (
     Any,
+    NoReturn,
     ParamSpec,
     TypeVar,
     get_args,
@@ -37,7 +38,7 @@ import httpx
 import socketio
 from pydantic import TypeAdapter
 
-from agentix.dispatch import detect_shape
+from agentix.invoke import detect_shape
 from agentix.runtime.shared.codec import pack, unpack
 from agentix.runtime.shared.events import (
     BIDI_END,
@@ -71,7 +72,7 @@ _CLIENT_CALL_ID: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 
 # ── Per-call hot-path caches ─────────────────────────────────────────
 #
-# `c.remote(fn, ...)` runs on every dispatch. Two repeated costs would
+# `c.remote(fn, ...)` runs on every remote call. Two repeated costs would
 # otherwise dominate a tight RL loop:
 #   * `inspect.signature(fn, eval_str=True)` — PEP 563 annotation eval
 #     is ~100–500 µs per call.
@@ -99,15 +100,30 @@ def _adapter_for(ann: Any) -> TypeAdapter:
     return a
 
 
-class RemoteCallError(RuntimeError):
-    """Raised when a remote namespace impl returns a non-ok RemoteResponse,
-    or when a stream/bidi call surfaces an `error` event from the wire."""
+def _target_for(fn: Callable[..., Any]) -> str:
+    module = getattr(fn, "__module__", None)
+    name = getattr(fn, "__name__", None)
+    if not isinstance(module, str) or not module:
+        raise TypeError("remote function must have a non-empty __module__")
+    if not isinstance(name, str) or not name:
+        raise TypeError("remote function must have a non-empty __name__")
+    return f"{module}::{name}"
 
-    def __init__(self, package: str, method: str, error: RemoteError):
-        super().__init__(f"{package}.{method}: {error.type}: {error.message}")
-        self.package = package
-        self.method = method
+
+class RemoteCallError(RuntimeError):
+    """Raised when a remote target returns a non-ok RemoteResponse, or
+    when a stream/bidi call surfaces an `error` event from the wire."""
+
+    def __init__(self, target: str, error: RemoteError):
+        super().__init__(f"{target}: {error.type}: {error.message}")
+        self.target = target
         self.error = error
+
+
+def _raise_remote_error(target: str, error: RemoteError) -> NoReturn:
+    if error.cancelled:
+        raise asyncio.CancelledError(error.message)
+    raise RemoteCallError(target=target, error=error)
 
 
 class RuntimeClient:
@@ -179,8 +195,7 @@ class RuntimeClient:
 
         Returns a tagged variant whose Python protocol matches the call
         shape — `await` a `Unary`, `async for` over a `Stream` or `Bidi`.
-        Generic helpers can `match` on the variant for exhaustive
-        dispatch.
+        Generic helpers can `match` on the variant for exhaustive handling.
 
           * `async def f(...) -> T`                          → `Unary[T]`
           * `async def f(...) -> AsyncIterator[T]: yield ...` → `Stream[T]`
@@ -206,7 +221,7 @@ class RuntimeClient:
         instance from bound arguments, and recover `T` for item validation.
 
         Returns `(param_name, channel, item_type)`. Raises if the bidi
-        method has no Channel-typed param, or the user didn't pass a
+        function has no Channel-typed param, or the user didn't pass a
         Channel instance for it."""
         for pname, param in sig.parameters.items():
             if not is_channel_annotation(param.annotation):
@@ -221,15 +236,14 @@ class RuntimeClient:
             type_args = get_args(param.annotation)
             return pname, ch, (type_args[0] if type_args else Any)
         raise TypeError(
-            f"{fn.__module__}.{fn.__name__}: bidi method has no "
+            f"{fn.__module__}.{fn.__name__}: bidi function has no "
             f"Channel[T] parameter"
         )
 
     async def _remote_unary(self, fn, sig, args, kwargs):
-        package = fn.__module__
-        method = fn.__name__
+        target = _target_for(fn)
         payload = {
-            "package": package, "method": method,
+            "target": target,
             "args": _encode_args(sig, args),
             "kwargs": _encode_kwargs(sig, kwargs),
         }
@@ -245,28 +259,27 @@ class RuntimeClient:
         resp = RemoteResponse.model_validate(unpack(r.content))
         if not resp.ok:
             assert resp.error is not None
-            raise RemoteCallError(package=package, method=method, error=resp.error)
+            _raise_remote_error(target, resp.error)
         return_ann = sig.return_annotation
         if return_ann is inspect.Signature.empty:
             return resp.value
         return _adapter_for(return_ann).validate_python(resp.value)
 
     async def _remote_stream(self, fn, sig, args, kwargs):
-        package = fn.__module__
-        method = fn.__name__
+        target = _target_for(fn)
         sio = await self._ensure_sio()
-        call_id = uuid.uuid4().hex
         outer_call_id = _CLIENT_CALL_ID.get()
+        call_id = outer_call_id or uuid.uuid4().hex
         q: asyncio.Queue = asyncio.Queue()
         self._pending[call_id] = q
 
         ret_args = get_args(sig.return_annotation)
         item_adapter = _adapter_for(ret_args[0] if ret_args else Any)
+        terminated = False
         try:
             payload = {
-                "call_id": outer_call_id or call_id,
-                "package": package,
-                "method": method,
+                "call_id": call_id,
+                "target": target,
                 "args": _encode_args(sig, args),
                 "kwargs": _encode_kwargs(sig, kwargs),
             }
@@ -274,16 +287,19 @@ class RuntimeClient:
             while True:
                 kind, data = await q.get()
                 if kind == "end":
+                    terminated = True
                     return
                 if kind == "error":
                     err = RemoteError.model_validate(data["error"])
-                    raise RemoteCallError(package=package, method=method, error=err)
+                    terminated = True
+                    _raise_remote_error(target, err)
                 if kind == "item":
                     yield item_adapter.validate_python(data["value"])
         finally:
             self._pending.pop(call_id, None)
-            with contextlib.suppress(BaseException):
-                await sio.emit(CANCEL, pack({"call_id": call_id}))
+            if not terminated:
+                with contextlib.suppress(BaseException):
+                    await sio.emit(CANCEL, pack({"call_id": call_id}))
 
     async def _remote_bidi(
         self, fn, sig, chan_name: str, in_item_type: Any,
@@ -297,8 +313,7 @@ class RuntimeClient:
         by `_extract_channel` in `remote()`; this method does not
         re-scan the signature.
         """
-        package = fn.__module__
-        method = fn.__name__
+        target = _target_for(fn)
 
         non_channel_kwargs = dict(bound_arguments)
         non_channel_kwargs.pop(chan_name, None)
@@ -308,14 +323,14 @@ class RuntimeClient:
         in_adapter = _adapter_for(in_item_type)
 
         sio = await self._ensure_sio()
-        call_id = uuid.uuid4().hex
         outer_call_id = _CLIENT_CALL_ID.get()
+        call_id = outer_call_id or uuid.uuid4().hex
         q: asyncio.Queue = asyncio.Queue()
         self._pending[call_id] = q
 
         payload = {
-            "call_id": outer_call_id or call_id,
-            "package": package, "method": method,
+            "call_id": call_id,
+            "target": target,
             "args": [], "kwargs": non_channel_kwargs,
         }
         await sio.emit(BIDI_START, pack(payload))
@@ -331,14 +346,17 @@ class RuntimeClient:
                 pass
 
         sender = asyncio.create_task(_sender())
+        terminated = False
         try:
             while True:
                 kind, data = await q.get()
                 if kind == "end":
+                    terminated = True
                     return
                 if kind == "error":
                     err = RemoteError.model_validate(data["error"])
-                    raise RemoteCallError(package=package, method=method, error=err)
+                    terminated = True
+                    _raise_remote_error(target, err)
                 if kind == "item":
                     yield out_adapter.validate_python(data["value"])
         finally:
@@ -346,8 +364,9 @@ class RuntimeClient:
             with contextlib.suppress(BaseException):
                 await sender
             self._pending.pop(call_id, None)
-            with contextlib.suppress(BaseException):
-                await sio.emit(CANCEL, pack({"call_id": call_id}))
+            if not terminated:
+                with contextlib.suppress(BaseException):
+                    await sio.emit(CANCEL, pack({"call_id": call_id}))
 
     # ── Socket.IO connection management ─────────────────────────
 
@@ -359,12 +378,12 @@ class RuntimeClient:
                 return self._sio
             sio = socketio.AsyncClient()
 
-            async def _on_stream_item(data): await self._dispatch_event("item", data)
-            async def _on_stream_end(data):  await self._dispatch_event("end", data)
-            async def _on_stream_error(data): await self._dispatch_event("error", data)
-            async def _on_bidi_out(data):   await self._dispatch_event("item", data)
-            async def _on_bidi_end(data):   await self._dispatch_event("end", data)
-            async def _on_bidi_error(data): await self._dispatch_event("error", data)
+            async def _on_stream_item(data): await self._route_event("item", data)
+            async def _on_stream_end(data):  await self._route_event("end", data)
+            async def _on_stream_error(data): await self._route_event("error", data)
+            async def _on_bidi_out(data):   await self._route_event("item", data)
+            async def _on_bidi_end(data):   await self._route_event("end", data)
+            async def _on_bidi_error(data): await self._route_event("error", data)
 
             sio.on(STREAM_ITEM, _on_stream_item)
             sio.on(STREAM_END, _on_stream_end)
@@ -377,7 +396,7 @@ class RuntimeClient:
             self._sio = sio
             return sio
 
-    async def _dispatch_event(self, kind: str, raw: Any) -> None:
+    async def _route_event(self, kind: str, raw: Any) -> None:
         data = _decode_payload(raw)
         call_id = data.get("call_id")
         q = self._pending.get(call_id) if isinstance(call_id, str) else None
@@ -431,4 +450,3 @@ def _decode_payload(raw: Any) -> dict[str, Any]:
     if isinstance(raw, bytes):
         return unpack(raw)
     return raw
-

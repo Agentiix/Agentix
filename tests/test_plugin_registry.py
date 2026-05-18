@@ -10,22 +10,36 @@ Covers the four scenarios every plugin axis cares about:
 
 from __future__ import annotations
 
-from types import SimpleNamespace
+from dataclasses import dataclass
 
 import pytest
 
 from agentix.deployment._plugin import PluginConflictError, Registry
 
 
+@dataclass(frozen=True)
+class _FakeDist:
+    name: str
+    version: str | None
+
+
+@dataclass(frozen=True)
+class _FakeEntryPoint:
+    name: str
+    load: object
+    value: str
+    dist: _FakeDist | None
+
+
 def _fake_ep(name: str, loader, dist_name: str | None = None,
              dist_version: str | None = None):
     """Build a stand-in for an importlib.metadata EntryPoint."""
     dist = (
-        SimpleNamespace(name=dist_name, version=dist_version)
+        _FakeDist(name=dist_name, version=dist_version)
         if dist_name is not None
         else None
     )
-    return SimpleNamespace(name=name, load=loader, value=f"x:{name}", dist=dist)
+    return _FakeEntryPoint(name=name, load=loader, value=f"x:{name}", dist=dist)
 
 
 def _patch_eps(registry: Registry, eps: list):

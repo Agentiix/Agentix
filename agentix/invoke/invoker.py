@@ -1,15 +1,14 @@
-"""`Dispatcher` — lazy-binding RPC dispatch for a Python module / class.
+"""`FunctionInvoker` — lazy-binding calls into a Python module or class.
 
 Construct with a target (any object holding async functions as
-attributes). `dispatch` / `dispatch_stream` / `dispatch_bidi` look up
-`request.method` on the target, lazily build a `_BoundMethod` for it
+attributes). `call_unary` / `call_stream` / `call_bidi` look up
+`request.function` on the target, lazily build a `_BoundMethod` for it
 (TypeAdapter compile happens once per method, cached), coerce wire args
 through the adapters, await the impl, serialize the result, and trap
 exceptions into a `RemoteError` so the wire stays 200.
 
-No upfront namespace walk, no "is it a namespace" check — any
-importable target works. The worker subprocess constructs one
-Dispatcher per spawned package and feeds it incoming frames.
+The worker subprocess constructs one `FunctionInvoker` per imported
+module and reuses it for later calls to the same module.
 """
 
 from __future__ import annotations
@@ -22,9 +21,9 @@ from typing import Any, get_args
 
 from pydantic import TypeAdapter, ValidationError
 
-from agentix.dispatch.bound import _BoundMethod, coerce_args
-from agentix.dispatch.shape import detect_shape
-from agentix.runtime.shared.idents import MethodName
+from agentix.invoke.bound import _BoundMethod, coerce_args
+from agentix.invoke.shape import detect_shape
+from agentix.runtime.shared.idents import FunctionName
 from agentix.runtime.shared.models import (
     RemoteError,
     RemoteRequest,
@@ -32,42 +31,42 @@ from agentix.runtime.shared.models import (
 )
 from agentix.runtime.shared.rpc import is_channel_annotation
 
-logger = logging.getLogger("agentix.dispatch")
+logger = logging.getLogger("agentix.invoke")
 
 
-class Dispatcher:
-    """RPC dispatch into a Python target's public async functions.
+class FunctionInvoker:
+    """Call public functions exposed by a Python target.
 
     `target` is any object exposing async functions / async generators
     as attributes — a module (recommended), a class, a regular object.
-    Methods are resolved + bound on first call by name; results cached.
+    Functions are resolved and bound on first call by name; results cached.
     """
 
     def __init__(self, target: Any) -> None:
         self._target = target
-        self._methods: dict[MethodName, _BoundMethod[Any, Any]] = {}  # lazy cache
+        self._methods: dict[FunctionName, _BoundMethod[Any, Any]] = {}  # lazy cache
 
     # ── lazy resolution ────────────────────────────────────────────
 
-    def _resolve(self, method: MethodName) -> _BoundMethod[Any, Any] | None:
+    def _resolve(self, function: FunctionName) -> _BoundMethod[Any, Any] | None:
         """Look up + lazy-bind. Returns None for missing attributes or
-        Python dunders; the dispatch path turns that into MethodNotFound.
+        Python dunders.
 
-        Any callable attribute is dispatchable. Sync functions work for
-        unary; the dispatcher checks `isawaitable(result)` at runtime.
+        Any callable attribute is remote-callable. Sync functions work for
+        unary; the invoker checks `isawaitable(result)` at runtime.
         Streams / bidi structurally need async generators (`async for`
         is the only way to iterate them) — `detect_shape` enforces that
         via `isasyncgenfunction`.
         """
-        cached = self._methods.get(method)
+        cached = self._methods.get(function)
         if cached is not None:
             return cached
-        if not isinstance(method, str):
+        if not isinstance(function, str):
             return None
         # Block Python dunders — they're framework machinery, never user methods.
-        if method.startswith("__") and method.endswith("__"):
+        if function.startswith("__") and function.endswith("__"):
             return None
-        fn = getattr(self._target, method, None)
+        fn = getattr(self._target, function, None)
         if fn is None:
             return None
         # @staticmethod wrappers — unwrap to the underlying function so
@@ -75,11 +74,11 @@ class Dispatcher:
         actual = fn.__func__ if isinstance(fn, staticmethod) else fn
         if not callable(actual):
             return None
-        bound = self._build(method, actual)
-        self._methods[method] = bound
+        bound = self._build(function, actual)
+        self._methods[function] = bound
         return bound
 
-    def _build(self, name: MethodName, fn: Any) -> _BoundMethod[Any, Any]:
+    def _build(self, name: FunctionName, fn: Any) -> _BoundMethod[Any, Any]:
         # eval_str=True resolves PEP 563 stringified annotations
         # (`from __future__ import annotations` in the module) — without
         # it, `param.annotation` would be a string and `get_origin` would
@@ -131,29 +130,29 @@ class Dispatcher:
 
     # ── introspection (used by the in-process worker) ─────────────
 
-    def is_streaming(self, method: MethodName) -> bool:
-        m = self._resolve(method)
+    def is_streaming(self, function: FunctionName) -> bool:
+        m = self._resolve(function)
         return m is not None and m.is_stream
 
-    def is_bidi(self, method: MethodName) -> bool:
-        m = self._resolve(method)
+    def is_bidi(self, function: FunctionName) -> bool:
+        m = self._resolve(function)
         return m is not None and m.is_bidi
 
-    def input_adapter_for(self, method: MethodName) -> TypeAdapter[Any] | None:
-        m = self._resolve(method)
+    def input_adapter_for(self, function: FunctionName) -> TypeAdapter[Any] | None:
+        m = self._resolve(function)
         return m.input_item_adapter if m else None
 
-    # ── dispatch entry points ─────────────────────────────────────
+    # ── call entry points ─────────────────────────────────────────
 
-    async def dispatch(self, request: RemoteRequest) -> RemoteResponse:
-        """Unary dispatch. Resolves + invokes; serializes return value."""
-        m = self._resolve(request.method)
+    async def call_unary(self, request: RemoteRequest) -> RemoteResponse:
+        """Resolve and invoke a unary function; serialize its return value."""
+        m = self._resolve(request.function)
         if m is None:
             return RemoteResponse(
                 ok=False,
                 error=RemoteError(
-                    type="MethodNotFound",
-                    message=f"no public async method {request.method!r} on {self._target!r}",
+                    type="FunctionNotFound",
+                    message=f"no public remote function {request.function!r} on {self._target!r}",
                 ),
             )
         try:
@@ -168,7 +167,7 @@ class Dispatcher:
             if inspect.isawaitable(result):
                 result = await result
         except Exception as exc:
-            logger.exception("namespace impl '%s' raised", m.name)
+            logger.exception("remote function '%s' raised", m.name)
             return RemoteResponse(
                 ok=False,
                 error=RemoteError(
@@ -189,19 +188,19 @@ class Dispatcher:
             )
         return RemoteResponse(ok=True, value=value)
 
-    async def dispatch_stream(self, request: RemoteRequest) -> AsyncIterator[dict[str, Any]]:
-        """Server-streaming dispatch. Yields {item|end|error} event dicts."""
-        m = self._resolve(request.method)
+    async def call_stream(self, request: RemoteRequest) -> AsyncIterator[dict[str, Any]]:
+        """Server-streaming call. Yields {item|end|error} event dicts."""
+        m = self._resolve(request.function)
         if m is None:
             yield {"type": "error", "error": RemoteError(
-                type="MethodNotFound",
-                message=f"no public async method {request.method!r} on {self._target!r}",
+                type="FunctionNotFound",
+                message=f"no public remote function {request.function!r} on {self._target!r}",
             ).model_dump()}
             return
         if not m.is_stream or m.is_bidi:
             yield {"type": "error", "error": RemoteError(
-                type="NotAStreamingMethod",
-                message=f"method {request.method!r} is not a (non-bidi) streaming method",
+                type="NotAStreamFunction",
+                message=f"function {request.function!r} is not a non-bidi streaming function",
             ).model_dump()}
             return
         try:
@@ -225,7 +224,7 @@ class Dispatcher:
                     return
                 yield {"type": "item", "value": value}
         except Exception as exc:
-            logger.exception("namespace stream impl '%s' raised mid-stream", m.name)
+            logger.exception("remote stream function '%s' raised mid-stream", m.name)
             yield {"type": "error", "error": RemoteError(
                 type=type(exc).__name__,
                 message=str(exc),
@@ -234,24 +233,24 @@ class Dispatcher:
             return
         yield {"type": "end"}
 
-    async def dispatch_bidi(
+    async def call_bidi(
         self,
         request: RemoteRequest,
         input_iter: AsyncIterator[Any],
     ) -> AsyncIterator[dict[str, Any]]:
-        """Bidi dispatch. `input_iter` is the caller-pushed inbound stream;
+        """Bidirectional call. `input_iter` is the caller-pushed inbound stream;
         items must already match the impl's `Channel[T]` item type."""
-        m = self._resolve(request.method)
+        m = self._resolve(request.function)
         if m is None:
             yield {"type": "error", "error": RemoteError(
-                type="MethodNotFound",
-                message=f"no public async method {request.method!r} on {self._target!r}",
+                type="FunctionNotFound",
+                message=f"no public remote function {request.function!r} on {self._target!r}",
             ).model_dump()}
             return
         if not m.is_bidi:
             yield {"type": "error", "error": RemoteError(
-                type="NotABidiMethod",
-                message=f"method {request.method!r} is not bidirectional",
+                type="NotABidiFunction",
+                message=f"function {request.function!r} is not bidirectional",
             ).model_dump()}
             return
         assert m.input_channel_param is not None
@@ -287,7 +286,7 @@ class Dispatcher:
                     return
                 yield {"type": "item", "value": value}
         except Exception as exc:
-            logger.exception("namespace bidi impl '%s' raised mid-stream", m.name)
+            logger.exception("remote bidi function '%s' raised mid-stream", m.name)
             yield {"type": "error", "error": RemoteError(
                 type=type(exc).__name__,
                 message=str(exc),
@@ -297,4 +296,4 @@ class Dispatcher:
         yield {"type": "end"}
 
 
-__all__ = ["Dispatcher"]
+__all__ = ["FunctionInvoker"]

@@ -1,28 +1,28 @@
 """Sandbox-side runtime server.
 
 Composes FastAPI (for HTTP unary `/_remote`) and Socket.IO (for streams
-+ bidi) into the ASGI app uvicorn runs. Every dispatch routes to a
-per-namespace worker subprocess via the `NamespaceMultiplexer`.
++ bidi) into the ASGI app uvicorn runs. Remote calls route to one
+runtime worker subprocess.
 
 Submodules:
-  - `app`         — FastAPI app, lifespan, /_remote unary dispatch
+  - `app`         — FastAPI app, lifespan, /_remote unary calls
   - `sio`         — Socket.IO server + stream/bidi event handlers
-  - `multiplexer` — package→worker routing, on-demand registration
-  - `worker`      — per-namespace subprocess entry point
+  - `worker_client` — server-side bridge to the worker process
+  - `worker`        — worker subprocess entry point
 """
 
 from agentix.runtime.server.app import (
-    _multiplexer,
+    _worker,
     app,
     main,
 )
 
-# `multiplexer` alias for tests that want to introspect or register
-# in-process namespaces against the live runtime.
-multiplexer = _multiplexer
+# `worker` alias for tests that want to register in-process targets against
+# the live runtime.
+worker = _worker
 
 __all__ = [
     "app",
     "main",
-    "multiplexer",
+    "worker",
 ]

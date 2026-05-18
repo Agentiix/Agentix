@@ -1,12 +1,9 @@
 """Plugin registry for the `agentix.deployment` entry-point group.
 
 Lives under `agentix.deployment` because deployments are the only
-host-side axis the framework discovers via entry points — the project's
-rule is that only sandbox-lifecycle axes (`agentix.namespace` for
-sandbox-side, `agentix.deployment` for host-side) get plugin discovery;
-everything else is plain Python composition. The namespace axis has its
-own bespoke walker in `agentix.dispatch.entry_points`; this generic
-`Registry[T]` powers `Deployment.load(name)`.
+framework axis discovered via entry points. Remote functions are plain
+importable Python modules; only sandbox lifecycle backends need a
+name-to-class registry for `agentix deploy <name>`.
 
 Two ways to find plugins:
 

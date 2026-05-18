@@ -1,30 +1,27 @@
 ---
 title: Agentix
-description: The execution, tracing, and integration bridge between agents and your LLM stack.
+description: The execution and integration bridge between agents and evaluation infrastructure.
 ---
 
 **Agentix is the bridge between agents and the infrastructure around
 them.** It runs agent CLIs and Python frameworks inside isolated
-rollout containers, exposes them as typed Python functions, captures
-LLM and tool activity as structured traces, and routes those traces to
-evaluation harnesses, RL training buffers, observability, or custom
-serving stacks.
+rollout containers and exposes them as typed Python functions for
+evaluators, trainers, and orchestration code.
 
 Use the same bridge for Claude Code, Codex, Aider, mini-swe-agent,
 OpenHands, your own agent, SWE-bench, internal benchmarks, and RL
-post-training. Each agent, dataset, or tool is a normal Python
-package; Agentix handles dispatch across the host-to-container
-boundary.
+post-training. Each agent, dataset, or tool is a normal Python module;
+Agentix calls it across the host-to-container boundary.
 
 <CardGroup cols={2}>
   <Card title="Run agents" icon="robot" href="/integrate-agent">
-    Wrap a CLI or Python framework as a typed Agentix namespace.
+    Wrap a CLI or Python framework as a typed Python module.
   </Card>
   <Card title="Score rollouts" icon="check" href="/integrate-dataset">
     Keep benchmark scorers separate from agents so both sides stay swappable.
   </Card>
   <Card title="Feed RL" icon="diagram-project" href="/integrate-agent">
-    Stream traces through abridge into slime, verl, or your own sink.
+    Compose rollout execution through one typed remote-call path.
   </Card>
   <Card title="Deploy anywhere" icon="server" href="/deployment">
     Start with Docker, then move the same bundle to hosted backends.
@@ -35,58 +32,58 @@ boundary.
 
 | From | Through Agentix | To |
 | --- | --- | --- |
-| Agent CLIs and Python frameworks | Isolated namespace workers and typed remote dispatch | Evaluators, trainers, and orchestration code |
+| Agent CLIs and Python frameworks | One worker subprocess and typed remote calls | Evaluators, trainers, and orchestration code |
 | Shell, file, and tool operations | Shared rollout container surface | Agents and benchmark harnesses |
-| LLM calls and tool events | Structured trace capture and fan-out | Observability, reward, replay, and dataset pipelines |
-| Rollout traces | [abridge](https://github.com/Agentiix/abridge) correlation and sink protocol | RL buffers such as slime / verl, or custom serving stacks |
+| Rollout metadata | User-provided call IDs and companion trace bridges | Observability, reward, replay, and dataset pipelines |
 
 ## A Rollout Is Just Python
 
 This SWE-bench Verified flow composes three integrations: prepare the
 repo with `bash`, run Claude Code, then score the resulting patch with
-the SWE-bench namespace.
+the SWE-bench module.
 
 ```python
 from datasets import load_dataset
-from agentix import RuntimeClient, bash, claude_code, swebench
+from agentix import RuntimeClient
+from agentix.bash import run as bash_run
+from agentix.claude_code import run as run_claude
+from agentix.swebench import score
 
 inst = dict(load_dataset("princeton-nlp/SWE-bench_Verified", split="test")[0])
 
 async with RuntimeClient(sandbox.runtime_url) as c:
     await c.remote(
-        bash.run,
+        bash_run,
         command=(
             f"git clone https://github.com/{inst['repo']}.git /testbed && "
             f"cd /testbed && git checkout {inst['base_commit']}"
         ),
     )
     cc = await c.remote(
-        claude_code.run,
+        run_claude,
         instruction=inst["problem_statement"],
         workdir="/testbed",
         env={"ANTHROPIC_API_KEY": api_key},
     )
     diff = await c.remote(
-        bash.run, command="cd /testbed && git add -A && git diff --cached",
+        bash_run, command="cd /testbed && git add -A && git diff --cached",
     )
-    score = await c.remote(swebench.score, instance=inst, patch=diff.stdout)
+    report = await c.remote(score, instance=inst, patch=diff.stdout)
 ```
 
 ## Why Teams Use It
 
-- **One bridge, many stacks.** Agents, tools, scorers, deployment
-  backends, and trace sinks plug into the same runtime surface.
-- **Typed dispatch.** `c.remote(fn, ...)` reads the function signature,
+- **One bridge, many stacks.** Agents, tools, scorers, and deployment
+  backends plug into the same runtime surface.
+- **Typed remote calls.** `c.remote(fn, ...)` reads the function signature,
   so kwargs and return types flow into your editor and type checker.
-- **Dependency isolation.** Each namespace runs with its own
-  dependencies inside the rollout container, so incompatible agent
-  stacks can ship together.
-- **Training-ready traces.** Every LLM call and tool invocation can
-  stream into [abridge](https://github.com/Agentiix/abridge), then into
-  framework adapters for [slime](https://github.com/THUDM/slime),
-  [verl](https://github.com/volcengine/verl), or a custom sink.
+- **Worker isolation.** Remote functions run in one worker subprocess
+  while sharing the bundle's runtime venv.
+- **Training-ready composition.** Agents, tools, and scorers use the
+  same typed call path, so rollout code can swap pieces without a new
+  runner.
 - **Composable evaluation.** Agent execution and benchmark scoring are
-  separate namespaces, so you can swap agents, datasets, and backends
+  separate modules, so you can swap agents, datasets, and backends
   independently.
 
 ## Supported Today
@@ -114,7 +111,8 @@ async with RuntimeClient(sandbox.runtime_url) as c:
 
 ### Execution Backends
 
-- `local` (Docker), `daytona`, `e2b` — built in.
+- `local` (Docker) ships in `agentix-deployment-docker`.
+- `daytona` and `e2b` ship in their deployment packages.
 - Third-party backends — `pip install agentix-deployment-<name>`.
 
 ## Read Next
@@ -127,6 +125,6 @@ async with RuntimeClient(sandbox.runtime_url) as c:
     Working integrations for Claude Code and SWE-bench.
   </Card>
   <Card title="Architecture" icon="sitemap" href="/reference/architecture">
-    Runtime server, namespace workers, deployment backends.
+    Runtime server, worker process, bundle dependencies.
   </Card>
 </CardGroup>

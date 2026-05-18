@@ -1,6 +1,6 @@
 """`_BoundMethod` record + the kwargs coercion helper.
 
-Internal to `agentix.dispatch` — the public surface is `Dispatcher`.
+Internal to `agentix.invoke` — the public surface is `FunctionInvoker`.
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ from typing import Any, Generic, ParamSpec, TypeVar
 
 from pydantic import TypeAdapter
 
-from agentix.dispatch.shape import Shape
+from agentix.invoke.shape import Shape
 
 P = ParamSpec("P")
 R = TypeVar("R")
@@ -76,5 +76,5 @@ def coerce_args(
             out_kwargs[pname] = v
     return out_args, out_kwargs
 
-# Internal — nothing here is part of the public dispatch API.
-# `Dispatcher` (in dispatcher.py) is the only consumer.
+# Internal — nothing here is part of the public remote-call API.
+# `FunctionInvoker` (in invoker.py) is the only consumer.

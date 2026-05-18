@@ -2,11 +2,10 @@
 
 A deployment backend is anything that creates / deletes / inspects a
 sandbox. The framework treats them as plugins: each backend is a class
-registered under the `agentix.deployment` entry-point group. Builtin
-`local` / `daytona` / `e2b` are registered in the framework's own
-`pyproject.toml`; third parties (`agentix-deployment-fly`, …) just
-declare their own entry point and `pip install` makes them available
-to `agentix deploy <name>`.
+registered under the `agentix.deployment` entry-point group. Backends
+ship in their own packages (`agentix-deployment-docker`,
+`agentix-deployment-fly`, ...) and become available to
+`agentix deploy <name>` after install.
 
 ```toml
 # downstream pyproject.toml
@@ -84,7 +83,7 @@ class Deployment(Protocol):
 
     Backends are typically classes registered as entry points; the
     framework instantiates them with no arguments via `load_deployment`,
-    so any backend-specific configuration (API keys, regions, …) is
+    so any backend-specific configuration (API keys, regions, ...) is
     read from environment variables in the backend's `__init__`.
     """
 
@@ -93,9 +92,8 @@ class Deployment(Protocol):
     async def get(self, sandbox_id: SandboxId) -> SandboxInfo: ...
 
 
-# The plugin registry — one `agentix.deployment` group. Builtin
-# backends are registered in agentix's own pyproject.toml; downstream
-# dists add their own. Tests can also `register_deployment("fake", ...)`
+# The plugin registry — one `agentix.deployment` group. Backend dists add
+# their own entry points. Tests can also `register_deployment("fake", ...)`
 # imperatively via the public helper below.
 _deployments: Registry[type[Deployment]] = Registry("agentix.deployment")
 

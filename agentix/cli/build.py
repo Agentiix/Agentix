@@ -9,10 +9,9 @@ Usage:
 
 The single argument is a path to a directory containing `pyproject.toml`.
 That project's `[project].dependencies` are the bundle's plugin set —
-pip resolves them transitively, the resulting wheels install into the
-framework's venv at `/nix/runtime/`, and at runtime the multiplexer
-walks site-packages for `agentix.namespace` entry points to discover
-every installed plugin. **Neither the CLI nor the user enumerates
+pip resolves them transitively, and the resulting wheels install into
+the framework's venv at `/nix/runtime/`. At runtime, calls use the
+function's real Python module path. **Neither the CLI nor the user enumerates
 plugins on the command line.**
 
 Build shape:

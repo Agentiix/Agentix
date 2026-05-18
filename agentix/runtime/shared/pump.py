@@ -5,7 +5,7 @@ Bidi inbound is two-tier:
 
   * `intake` (unbounded) — the wire-facing handler does a synchronous
     `put_nowait` here, so the main read loop never blocks.
-  * `user_q` (bounded `DEFAULT_BIDI_BUFFER`) — the dispatcher's
+  * `user_q` (bounded `DEFAULT_BIDI_BUFFER`) — the invoker's
     `_input_iter` reads from here. The bound is what gives end-to-end
     backpressure: when full, `drain`'s `await put` blocks, intake
     grows briefly, OS pipe / Socket.IO buffer fills, ultimately the
