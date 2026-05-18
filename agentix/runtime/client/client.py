@@ -38,7 +38,6 @@ import socketio
 from pydantic import TypeAdapter
 
 from agentix.dispatch import detect_shape
-from agentix.rpc import Bidi, Channel, Stream, Unary, is_channel_annotation
 from agentix.runtime.shared.codec import pack, unpack
 from agentix.runtime.shared.events import (
     BIDI_END,
@@ -58,6 +57,7 @@ from agentix.runtime.shared.models import (
     RemoteError,
     RemoteResponse,
 )
+from agentix.runtime.shared.rpc import Bidi, Channel, Stream, Unary, is_channel_annotation
 
 P = ParamSpec("P")
 R = TypeVar("R")

@@ -24,13 +24,13 @@ from pydantic import TypeAdapter, ValidationError
 
 from agentix.dispatch.bound import _BoundMethod, coerce_args
 from agentix.dispatch.shape import detect_shape
-from agentix.idents import MethodName
-from agentix.rpc import is_channel_annotation
+from agentix.runtime.shared.idents import MethodName
 from agentix.runtime.shared.models import (
     RemoteError,
     RemoteRequest,
     RemoteResponse,
 )
+from agentix.runtime.shared.rpc import is_channel_annotation
 
 logger = logging.getLogger("agentix.dispatch")
 

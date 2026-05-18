@@ -1,4 +1,4 @@
-"""Wire-frame type tags + call-kind tags for `agentix.runtime.shared.rpc`.
+"""Wire-frame type tags + call-kind tags for `agentix.runtime.shared.framing`.
 
 These are the values of the `type` (and `kind`) fields in msgpack frames
 flowing between the runtime multiplexer and namespace workers over

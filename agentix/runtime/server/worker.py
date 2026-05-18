@@ -3,8 +3,8 @@
 A worker is a single-package dispatch process the multiplexer spawns
 lazily on first call. It loads ONE Python target (module or
 `module:attr`), wraps it in a `Dispatcher`, and serves dispatch over
-stdin/stdout using the RPC frame protocol in
-`agentix.runtime.shared.rpc`.
+stdin/stdout using the length-prefixed frame protocol in
+`agentix.runtime.shared.framing`.
 
 The worker holds:
 
@@ -28,11 +28,11 @@ import traceback
 from typing import Any
 
 from agentix.dispatch import Dispatcher
-from agentix.idents import CallId, PackageName
 from agentix.runtime.shared import frames as F
 from agentix.runtime.shared import pump as _pump
+from agentix.runtime.shared.framing import read_frame, write_frame
+from agentix.runtime.shared.idents import CallId, PackageName
 from agentix.runtime.shared.models import RemoteError, RemoteRequest
-from agentix.runtime.shared.rpc import read_frame, write_frame
 
 logger = logging.getLogger("agentix.runtime.server.worker")
 
@@ -307,7 +307,7 @@ async def _amain(target: str) -> None:
     except Exception as exc:
         # Worker hasn't initialized stdio framing yet; bootstrap a minimal
         # writer so the multiplexer learns why we're exiting.
-        from agentix.runtime.shared.rpc import pack_frame
+        from agentix.runtime.shared.framing import pack_frame
         sys.stdout.buffer.write(pack_frame({"type": F.BOOT_ERROR, "error": _err(exc)}))
         sys.stdout.buffer.flush()
         sys.exit(1)

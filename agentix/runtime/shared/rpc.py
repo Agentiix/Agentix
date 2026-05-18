@@ -1,72 +1,130 @@
-"""RPC framing for worker stdio — length-prefixed msgpack.
+"""Tagged-union RPC variants returned by `RuntimeClient.remote()`.
 
-Each frame on a worker's stdin/stdout is:
+The framework's three call shapes (unary, server-stream, bidi) are
+exposed as three frozen dataclass variants. Each implements the
+Python protocol that matches its shape, so the common case is a
+one-liner:
 
-  +--------+-------------------+
-  | u32 LE | n bytes msgpack   |
-  +--------+-------------------+
+    action = await c.remote(agent.predict, obs=obs)               # Unary
+    async for step in c.remote(env.rollout, seed=42): ...         # Stream
+    async for reply in c.remote(chat.chat, inbox=ch, opts=opts):  # Bidi
+        ch.send(...)
 
-The msgpack blob is a dict — see frame schemas below. `agentix.runtime.shared.codec`
-handles encode/decode, including ext types for ndarray + pydantic models.
+For generic dispatch over any shape, `match` on the variant:
 
-Frame schemas (`{"type": "...", ...}` — extra fields per type):
+    match c.remote(fn, ...):
+        case Unary(_) as u: result = await u
+        case Stream() as s: async for x in s: ...
+        case Bidi(inbox, _) as b: ...
 
-  ─── runtime → worker ─────────────────────────────────────
-    call         {call_id, method, args, kwargs, kind: "unary"|"stream"|"bidi"}
-    bidi_in      {call_id, item}            — push input chunk to a bidi call
-    bidi_end_in  {call_id}                   — close input side of a bidi call
-    cancel       {call_id}                   — abort an in-flight call
-    shutdown     {}                          — graceful exit; worker drains then exits
-
-  ─── worker → runtime ─────────────────────────────────────
-    ready        {package}                   — sent once after class binds OK
-    boot_error   {error}                     — sent once if class fails to bind
-    result       {call_id, value}            — unary success
-    error        {call_id, error}            — unary failure or stream/bidi error
-    stream_item  {call_id, value}            — one chunk of a streaming response
-    stream_end   {call_id}                   — clean end of stream/bidi out
-    trace        {kind, payload, call_id?, source?}   — namespace trace.emit()
-
-`call_id` correlates request frames with their response frames.
-
-Args/kwargs/values are native Python objects (msgpack round-trips them
-via codec's ext types). Pydantic validation happens on the receiving
-end via `TypeAdapter.validate_python` — there's no JSON intermediate.
+`Channel[T]` is the input-side helper for bidi. The user constructs
+one, passes it to `c.remote` as the bidi-marked kwarg, and pushes
+items via `.send()` from anywhere — typically from a producer task
+that runs concurrently with the output `async for`. Backpressure is
+the queue's `maxsize`; on close the channel raises `StopAsyncIteration`
+from its async iterator.
 """
 
 from __future__ import annotations
 
 import asyncio
-import struct
-from typing import Any
+from collections.abc import AsyncIterator, Coroutine, Generator
+from dataclasses import dataclass
+from typing import Any, Generic, TypeAlias, TypeVar, get_origin
 
-from agentix.runtime.shared.codec import pack, unpack
-
-
-def pack_frame(payload: dict[str, Any]) -> bytes:
-    """Encode one frame: 4-byte LE length + msgpack body."""
-    body = pack(payload)
-    return struct.pack("<I", len(body)) + body
+In = TypeVar("In")
+R = TypeVar("R")
 
 
-async def read_frame(reader: asyncio.StreamReader) -> dict[str, Any] | None:
-    """Read one frame from `reader`. Returns None on EOF."""
-    try:
-        header = await reader.readexactly(4)
-    except asyncio.IncompleteReadError:
-        return None
-    (n,) = struct.unpack("<I", header)
-    if n == 0:
-        return {}
-    body = await reader.readexactly(n)
-    return unpack(body)
+def is_channel_annotation(ann: Any) -> bool:
+    """True if `ann` is `Channel` or `Channel[T]`. The marker that
+    `agentix.dispatch.detect_shape` and `RuntimeClient.remote` use to
+    distinguish bidi from stream."""
+    return ann is Channel or get_origin(ann) is Channel
 
 
-async def write_frame(writer: asyncio.StreamWriter, payload: dict[str, Any]) -> None:
-    """Write one frame and flush. Callers serialize concurrent writes via
-    a lock; each call writes a complete frame in one shot."""
-    writer.write(pack_frame(payload))
-    await writer.drain()
+# Module-level singleton used to signal end-of-input through Channel's
+# internal queue. Compared with `is` — never exposed to user code.
+_CHANNEL_CLOSED: Any = object()
 
 
-__all__ = ["pack_frame", "read_frame", "write_frame"]
+class Channel(AsyncIterator[In], Generic[In]):
+    """User-pushed async channel for bidi inputs.
+
+    Satisfies `AsyncIterator[I]` — `Channel[T]` as a bidi method's
+    parameter annotation is what marks the call as bidi (see
+    `agentix.dispatch.detect_shape`). The caller pushes items with
+    `await ch.send(item)`; `await ch.close()` signals end-of-input.
+    Items are delivered FIFO. `maxsize` bounds the local buffer;
+    when full, `.send()` awaits until consumers (the framework's
+    pump task) drain space.
+    """
+
+    def __init__(self, maxsize: int = 0) -> None:
+        self._q: asyncio.Queue[Any] = asyncio.Queue(maxsize=maxsize)
+        self._closed = False
+
+    async def send(self, item: In) -> None:
+        if self._closed:
+            raise RuntimeError("Channel is closed")
+        await self._q.put(item)
+
+    async def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        await self._q.put(_CHANNEL_CLOSED)
+
+    def __aiter__(self) -> AsyncIterator[In]:
+        return self
+
+    async def __anext__(self) -> In:
+        item = await self._q.get()
+        if item is _CHANNEL_CLOSED:
+            raise StopAsyncIteration
+        return item
+
+
+@dataclass(frozen=True, slots=True)
+class Unary(Generic[R]):
+    """Awaitable result of a unary remote call. `await` it to get `R`."""
+
+    _coro: Coroutine[Any, Any, R]
+
+    def __await__(self) -> Generator[Any, None, R]:
+        return self._coro.__await__()
+
+
+@dataclass(frozen=True, slots=True)
+class Stream(Generic[R]):
+    """Server-streaming result. `async for` over it yields `R` items."""
+
+    _aiter: AsyncIterator[R]
+
+    def __aiter__(self) -> AsyncIterator[R]:
+        return self._aiter
+
+
+@dataclass(frozen=True, slots=True)
+class Bidi(Generic[In, R]):
+    """Bidirectional remote call. Push to `inbox`, `async for` for outputs.
+
+    `inbox` is the same `Channel[In]` the caller passed to `c.remote`;
+    storing it here lets generic match-based dispatch reach it without
+    needing the original variable.
+    """
+
+    inbox: Channel[In]
+    _aiter: AsyncIterator[R]
+
+    def __aiter__(self) -> AsyncIterator[R]:
+        return self._aiter
+
+
+RemoteCall: TypeAlias = Unary[R] | Stream[R] | Bidi[Any, R]
+
+
+__all__ = [
+    "Bidi", "Channel", "RemoteCall", "Stream", "Unary",
+    "is_channel_annotation",
+]

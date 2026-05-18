@@ -34,7 +34,6 @@ from typing import Any
 import socketio
 from pydantic import ValidationError
 
-from agentix.idents import CallId
 from agentix.runtime.server.multiplexer import NamespaceMultiplexer
 from agentix.runtime.shared import pump as _pump
 from agentix.runtime.shared.codec import pack, unpack
@@ -51,6 +50,7 @@ from agentix.runtime.shared.events import (
     STREAM_ERROR,
     STREAM_ITEM,
 )
+from agentix.runtime.shared.idents import CallId
 from agentix.runtime.shared.models import RemoteError, RemoteRequest
 
 logger = logging.getLogger("agentix.runtime.sio")

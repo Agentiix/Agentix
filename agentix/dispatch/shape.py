@@ -11,7 +11,7 @@ import inspect
 from collections.abc import Callable
 from typing import Any, Literal
 
-from agentix.rpc import is_channel_annotation
+from agentix.runtime.shared.rpc import is_channel_annotation
 
 Shape = Literal["unary", "stream", "bidi"]
 """How a method's signature maps onto the wire:

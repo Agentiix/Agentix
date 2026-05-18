@@ -42,8 +42,8 @@ from typing import Any, Protocol
 
 from agentix.dispatch import Dispatcher
 from agentix.runtime.shared import frames as F
+from agentix.runtime.shared.framing import read_frame, write_frame
 from agentix.runtime.shared.models import RemoteError, RemoteRequest, RemoteResponse
-from agentix.runtime.shared.rpc import read_frame, write_frame
 
 logger = logging.getLogger("agentix.runtime.server.multiplexer")
 

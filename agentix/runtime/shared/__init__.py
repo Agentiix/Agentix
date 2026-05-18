@@ -11,10 +11,12 @@ The runtime is split three ways:
 
 Submodules in this package:
 
-  - `codec`   — msgpack pack/unpack + ext types (numpy, pydantic)
-  - `events`  — Socket.IO event-name constants
-  - `frames`  — stdio frame `type` / `kind` tag constants
-  - `models`  — pydantic wire types (RemoteRequest, RemoteResponse, …)
-  - `rpc`     — length-prefixed msgpack framing for worker stdio
-  - `pump`    — per-bidi-call queue plumbing (used by both worker + SIO)
+  - `idents`   — branded NewType ids on the wire (CallId, PackageName, MethodName)
+  - `rpc`      — caller-side variants (`Channel`, `Unary`, `Stream`, `Bidi`)
+  - `codec`    — msgpack pack/unpack + ext types (numpy, pydantic)
+  - `events`   — Socket.IO event-name constants
+  - `frames`   — stdio frame `type` / `kind` tag constants
+  - `framing`  — length-prefixed msgpack framing for worker stdio
+  - `models`   — pydantic wire types (RemoteRequest, RemoteResponse, …)
+  - `pump`     — per-bidi-call queue plumbing (used by both worker + SIO)
 """

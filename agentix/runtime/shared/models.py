@@ -11,7 +11,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from agentix.idents import CallId, MethodName, PackageName
+from agentix.runtime.shared.idents import CallId, MethodName, PackageName
 
 
 class HealthResponse(BaseModel):

@@ -16,8 +16,8 @@ import pkgutil
 __path__ = pkgutil.extend_path(__path__, __name__)
 
 from agentix.dispatch import Dispatcher
-from agentix.rpc import Bidi, Channel, RemoteCall, Stream, Unary
 from agentix.runtime.client import RemoteCallError, RuntimeClient
+from agentix.runtime.shared.rpc import Bidi, Channel, RemoteCall, Stream, Unary
 
 __version__ = "0.1.0"
 
