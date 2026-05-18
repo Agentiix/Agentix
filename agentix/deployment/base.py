@@ -46,13 +46,25 @@ SandboxId = NewType("SandboxId", str)
 class SandboxConfig(BaseModel):
     """Configuration a deployment uses to provision a sandbox.
 
-    The image is the Agentix runtime bundle produced by `agentix build`.
-    Local Docker can use that image directly; hosted deployments push or
-    register it with the backend service.
+    Two images, one container. `runtime_image` is the generic Agentix
+    bundle produced by `agentix build` — it carries the runtime server,
+    user callables, and their Python deps under `/nix/runtime/`.
+    `image` is the task-specific base (e.g. a SWE-bench task image, a
+    customer environment image) the workload actually runs against.
+
+    The deployment overlays `runtime_image:/nix` onto `image` at start
+    time (no rebuild, no copy), then runs `/nix/runtime/bin/agentix-server`
+    as the entrypoint inside `image`'s filesystem.
     """
 
     image: str = Field(
-        description="Agentix runtime bundle image ref, e.g. `my-agent:0.1.0`.",
+        description="Task base image — the environment the workload runs in "
+                    "(e.g. `swebench/task-django__django-12345:latest`).",
+    )
+    runtime_image: str = Field(
+        description="Agentix runtime bundle image ref produced by "
+                    "`agentix build`, e.g. `my-agent:0.1.0`. Mounted at "
+                    "`/nix` in the sandbox via `--mount type=image`.",
     )
     env: dict[str, str] | None = Field(
         default=None,
