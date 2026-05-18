@@ -37,7 +37,7 @@ The final image must satisfy:
 - `/nix/entry/manifest.json` — `ClosureManifest` with `abi == AGENTIX_CLOSURE_ABI` and `package = "agentix_closures.<name>"`. This file is what marks `/mnt/<dir>` as a closure; without it the runtime ignores the mount.
 - Optional: `/nix/entry/bin/<cli>` — native binaries the impl shells out to.
 
-There is no `bin/start`, no UDS, no FastAPI app inside the closure. The runtime imports the package and dispatches `POST /_remote` calls to the bound impl directly. Caller-side typing flows from `RuntimeClient.remote(<stub>, ...)`, where `<stub>` is a regular Python function imported from `agentix_closures.<name>`.
+There is no `bin/start`, no UDS, no FastAPI app inside the closure. Caller-side typing flows from `RuntimeClient.remote(<stub>, ...)`, where `<stub>` is a regular Python callable imported from `agentix_closures.<name>`.
 
 See `docs/closure-protocol.md` in Agentix for the full protocol.
 

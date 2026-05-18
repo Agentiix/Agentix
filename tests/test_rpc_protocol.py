@@ -1,7 +1,7 @@
 """Protocol-level integration tests for callable remote calls.
 
-These tests drive the runtime server over HTTP and Socket.IO while using
-the in-process worker backend. Subprocess stdio is covered separately in
+These tests drive the runtime server over Socket.IO while using the
+in-process worker backend. Subprocess stdio is covered separately in
 `test_worker_subprocess.py`.
 """
 
@@ -16,7 +16,7 @@ import socketio
 
 from agentix import Channel, RemoteCallError, RuntimeClient
 from agentix.runtime.shared.codec import pack, unpack
-from agentix.runtime.shared.events import CANCEL, STREAM, STREAM_ERROR
+from agentix.runtime.shared.events import CANCEL, STREAM, STREAM_ERROR, UNARY, UNARY_ERROR, UNARY_RESULT
 from agentix.runtime.shared.models import RemoteRequest
 from tests import _worker_target as target
 from tests._rpc_helpers import request_for
@@ -27,30 +27,61 @@ pytestmark = pytest.mark.asyncio
 # ── unary basics ───────────────────────────────────────────────────────
 
 
-async def test_http_unary_calls_serialized_callable(runtime_module, use_inprocess_worker):
-    use_inprocess_worker()
+async def test_http_remote_endpoint_is_not_registered(runtime_module):
     server, _, _ = runtime_module
     transport = httpx.ASGITransport(app=server.app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
-        body = pack(request_for(target.echo, kwargs={"msg": "hi"}).model_dump())
-        r = await http.post("/_remote", content=body, headers={"Content-Type": "application/msgpack"})
+        r = await http.post("/_remote", content=b"")
 
-    assert r.status_code == 200
-    assert unpack(r.content) == {"ok": True, "value": {"msg": "echo:hi"}, "error": None}
+    assert r.status_code == 404
 
 
-async def test_http_unary_bad_callable_payload_returns_error(runtime_module, use_inprocess_worker):
+async def test_socketio_unary_calls_serialized_callable(use_inprocess_worker, live_server):
     use_inprocess_worker()
-    server, _, _ = runtime_module
-    req = RemoteRequest(callable_payload=b"not-a-pickle", display_name="bad", shape="unary")
-    transport = httpx.ASGITransport(app=server.app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
-        r = await http.post("/_remote", content=pack(req.model_dump()), headers={"Content-Type": "application/msgpack"})
+    base_url = await live_server()
+    sio = socketio.AsyncClient()
+    results: asyncio.Queue = asyncio.Queue()
 
-    assert r.status_code == 200
-    resp = unpack(r.content)
-    assert resp["ok"] is False
-    assert resp["error"]["type"] in {"UnpicklingError", "ValueError"}
+    async def _on_result(data):
+        await results.put(unpack(data))
+
+    sio.on(UNARY_RESULT, _on_result)
+    await sio.connect(base_url)
+    try:
+        req = request_for(target.echo, kwargs={"msg": "hi"}, call_id="unary-ok")
+        await sio.emit(UNARY, pack(req.model_dump()))
+        payload = await asyncio.wait_for(results.get(), timeout=5)
+    finally:
+        await sio.disconnect()
+
+    assert payload == {"call_id": "unary-ok", "value": {"msg": "echo:hi"}}
+
+
+async def test_socketio_unary_bad_callable_payload_returns_error(use_inprocess_worker, live_server):
+    use_inprocess_worker()
+    base_url = await live_server()
+    sio = socketio.AsyncClient()
+    errors: asyncio.Queue = asyncio.Queue()
+
+    async def _on_error(data):
+        await errors.put(unpack(data))
+
+    sio.on(UNARY_ERROR, _on_error)
+    await sio.connect(base_url)
+    try:
+        req = RemoteRequest(
+            callable_payload=b"not-a-pickle",
+            display_name="bad",
+            shape="unary",
+            call_id="unary-bad",
+        )
+        await sio.emit(UNARY, pack(req.model_dump()))
+        payload = await asyncio.wait_for(errors.get(), timeout=5)
+    finally:
+        await sio.disconnect()
+
+    assert payload["call_id"] == "unary-bad"
+    assert payload["error"]["type"] in {"UnpicklingError", "ValueError"}
 
 
 async def test_client_remote_round_trip(use_inprocess_worker, live_server):

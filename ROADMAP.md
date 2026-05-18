@@ -20,7 +20,7 @@ Current architecture:
 - [x] One runtime server per sandbox image.
 - [x] One worker subprocess per runtime server.
 - [x] Pickle callable payloads for Python-native callable references.
-- [x] Callable invocation through `agentix.invoke`; targets are not
+- [x] Callable invocation through `agentix.runtime.invoke`; targets are not
       required to be pure functions. If Python can resolve the callable
       from the requested target, Agentix should be able to invoke it.
 - [x] Single-spec `agentix build`; integrations arrive through normal
@@ -73,26 +73,19 @@ The framework's responsibility is narrower:
 
 ### Transport Strategy
 
-Unary currently uses HTTP and stream/bidi use Socket.IO. This split is
-simple and works, but it is not a core user-facing concept.
+Remote calls use one Socket.IO connection for unary, stream, and bidi.
+HTTP is kept only for `/health`.
 
-Open question: should Agentix drop HTTP and run all call shapes over one
-Socket.IO connection or another unified binary transport?
+This gives the runtime one correlation, cancellation, and error path for
+all call shapes. Future trace/log event fan-out should share the same
+connection rather than adding another transport.
 
-Reasons to consider a unified transport:
+Remaining transport work:
 
-- one protocol path for unary, stream, and bidi
-- simpler cancellation and correlation semantics
-- easier future support for trace events and log streams
-- fewer server/client code paths
-
-Reasons to keep HTTP for unary:
-
-- easy debugging with ordinary HTTP tooling
-- simple load balancer and health-check behavior
-- natural fit for request/response calls
-
-This should be decided before the runtime protocol is treated as stable.
+- collapse the separate unary / stream / bidi event names into a single
+  `call:*` event family if the current naming becomes noisy
+- let the worker classify actual return values at runtime instead of
+  relying only on pre-call shape detection
 
 ## Sibling Repos
 

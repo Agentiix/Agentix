@@ -4,7 +4,7 @@
     constants. Both client and server depend on this; nothing here
     depends on `client/` or `server/`.
   * `agentix.runtime.client`  — orchestrator-side `RuntimeClient`
-    (HTTP for unary; Socket.IO for stream / bidi).
+    (HTTP health checks; Socket.IO remote calls).
   * `agentix.runtime.server`  — sandbox-side: FastAPI app, Socket.IO
     server, the `RuntimeWorkerClient`, and the `worker` subprocess
     (`python -m agentix.runtime.server.worker`).

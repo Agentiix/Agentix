@@ -77,7 +77,7 @@ Install the host framework and a deployment backend:
 pip install agentixx agentix-deployment-docker
 ```
 
-Create a remote target:
+Create a remote callable:
 
 ```python
 # src/hello_agentix/__init__.py
@@ -137,8 +137,8 @@ Sandbox
     calls fn(*args, **kwargs)
 ```
 
-Unary calls use HTTP `POST /_remote`. Streaming and bidirectional calls
-use Socket.IO events. Errors stay in-band.
+Remote calls use Socket.IO events for unary, streaming, and bidirectional
+shapes. HTTP is kept only for `/health`. Errors stay in-band.
 
 ## Repository Map
 

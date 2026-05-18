@@ -1,8 +1,8 @@
 """Orchestrator-side client for the agentix runtime.
 
 Public surface:
-  - `RuntimeClient` — connects to a running sandbox, drives unary RPC over
-    HTTP and stream/bidi/log subscriptions over Socket.IO.
+  - `RuntimeClient` — connects to a running sandbox, drives remote calls
+    over Socket.IO, and uses HTTP only for health checks.
   - `RemoteCallError` — raised when a remote impl returns a non-ok response.
 
 Implementation lives in `agentix.runtime.client.client`; this package's

@@ -8,12 +8,12 @@ result is decoded into `fn`'s return type.
 The framework's three call shapes (unary / stream / bidi) are detected
 from `fn`'s signature.
 
-Two transports underneath:
-  - HTTP for unary RPC (`POST /_remote`).
-  - Socket.IO for server-streaming + bidirectional calls.
+Transports underneath:
+  - HTTP only for `/health`.
+  - Socket.IO for unary, server-streaming, and bidirectional calls.
 
-The Socket.IO connection is lazy and shared across all stream/bidi
-calls on the same client. `call_id` routes each event to the right
+The Socket.IO connection is lazy and shared across all remote calls on
+the same client. `call_id` routes each event to the right
 in-flight call.
 """
 
@@ -39,7 +39,7 @@ import httpx
 import socketio
 from pydantic import TypeAdapter
 
-from agentix.invoke import detect_shape
+from agentix.runtime.invoke import detect_declared_shape
 from agentix.runtime.shared.callables import display_name_for, dump_callable
 from agentix.runtime.shared.codec import pack, unpack
 from agentix.runtime.shared.events import (
@@ -54,11 +54,13 @@ from agentix.runtime.shared.events import (
     STREAM_END,
     STREAM_ERROR,
     STREAM_ITEM,
+    UNARY,
+    UNARY_ERROR,
+    UNARY_RESULT,
 )
 from agentix.runtime.shared.models import (
     HealthResponse,
     RemoteError,
-    RemoteResponse,
 )
 from agentix.runtime.shared.rpc import Bidi, Channel, Stream, Unary, is_channel_annotation
 
@@ -111,7 +113,7 @@ class RemoteCallError(RuntimeError):
 
     def __init__(self, display_name: str, error: RemoteError):
         super().__init__(f"{display_name}: {error.type}: {error.message}")
-        self.target = display_name
+        self.display_name = display_name
         self.error = error
 
 
@@ -198,7 +200,7 @@ class RuntimeClient:
             → `Bidi[I, T]`; caller pushes inputs via `inbox.send(...)`
         """
         sig = _signature_of(fn)
-        shape = detect_shape(fn, sig)
+        shape = detect_declared_shape(fn, sig)
         if shape == "unary":
             return Unary(self._remote_unary(fn, sig, args, kwargs))
         if shape == "stream":
@@ -238,28 +240,39 @@ class RuntimeClient:
 
     async def _remote_unary(self, fn, sig, args, kwargs):
         display_name = display_name_for(fn)
+        sio = await self._ensure_sio()
+        outer_call_id = _CLIENT_CALL_ID.get()
+        call_id = outer_call_id or uuid.uuid4().hex
+        q: asyncio.Queue = asyncio.Queue()
+        self._pending[call_id] = q
+
         payload = {
             **_request_base(fn, "unary"),
+            "call_id": call_id,
             "args": _encode_args(sig, args),
             "kwargs": _encode_kwargs(sig, kwargs),
         }
-        call_id = _CLIENT_CALL_ID.get()
-        if call_id is not None:
-            payload["call_id"] = call_id
-        body = pack(payload)
-        r = await self._client.post(
-            "/_remote", content=body,
-            headers={"Content-Type": "application/msgpack"},
-        )
-        r.raise_for_status()
-        resp = RemoteResponse.model_validate(unpack(r.content))
-        if not resp.ok:
-            assert resp.error is not None
-            _raise_remote_error(display_name, resp.error)
-        return_ann = sig.return_annotation
-        if return_ann is inspect.Signature.empty:
-            return resp.value
-        return _adapter_for(return_ann).validate_python(resp.value)
+        terminated = False
+        try:
+            await sio.emit(UNARY, pack(payload))
+            while True:
+                kind, data = await q.get()
+                if kind == "result":
+                    terminated = True
+                    value = data.get("value")
+                    return_ann = sig.return_annotation
+                    if return_ann is inspect.Signature.empty:
+                        return value
+                    return _adapter_for(return_ann).validate_python(value)
+                if kind == "error":
+                    err = RemoteError.model_validate(data["error"])
+                    terminated = True
+                    _raise_remote_error(display_name, err)
+        finally:
+            self._pending.pop(call_id, None)
+            if not terminated:
+                with contextlib.suppress(BaseException):
+                    await sio.emit(CANCEL, pack({"call_id": call_id}))
 
     async def _remote_stream(self, fn, sig, args, kwargs):
         display_name = display_name_for(fn)
@@ -380,7 +393,11 @@ class RuntimeClient:
             async def _on_bidi_out(data):   await self._route_event("item", data)
             async def _on_bidi_end(data):   await self._route_event("end", data)
             async def _on_bidi_error(data): await self._route_event("error", data)
+            async def _on_unary_result(data): await self._route_event("result", data)
+            async def _on_unary_error(data): await self._route_event("error", data)
 
+            sio.on(UNARY_RESULT, _on_unary_result)
+            sio.on(UNARY_ERROR, _on_unary_error)
             sio.on(STREAM_ITEM, _on_stream_item)
             sio.on(STREAM_END, _on_stream_end)
             sio.on(STREAM_ERROR, _on_stream_error)

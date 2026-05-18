@@ -38,7 +38,7 @@ R = TypeVar("R")
 
 def is_channel_annotation(ann: Any) -> bool:
     """True if `ann` is `Channel` or `Channel[T]`. The marker that
-    `agentix.invoke.detect_shape` and `RuntimeClient.remote` use to
+    `agentix.runtime.invoke.detect_declared_shape` and `RuntimeClient.remote` use to
     distinguish bidi from stream."""
     return ann is Channel or get_origin(ann) is Channel
 
@@ -53,7 +53,7 @@ class Channel(AsyncIterator[In], Generic[In]):
 
     Satisfies `AsyncIterator[I]` — `Channel[T]` as a bidi callable's
     parameter annotation is what marks the call as bidi (see
-    `agentix.invoke.detect_shape`). The caller pushes items with
+    `agentix.runtime.invoke.detect_declared_shape`). The caller pushes items with
     `await ch.send(item)`; `await ch.close()` signals end-of-input.
     Items are delivered FIFO. `maxsize` bounds the local buffer;
     when full, `.send()` awaits until consumers (the framework's

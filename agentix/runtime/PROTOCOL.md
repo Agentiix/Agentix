@@ -28,14 +28,14 @@ my_project.tasks::run
 
 | Path | Shape used | Wire |
 | --- | --- | --- |
-| `POST /_remote` | unary | msgpack body + msgpack response |
-| `/socket.io/` | stream + bidi | msgpack-payload events |
+| `/health` | health | HTTP JSON |
+| `/socket.io/` | unary + stream + bidi | msgpack-payload events |
 | worker stdin/stdout | all three | length-prefixed msgpack frames |
 
-HTTP and Socket.IO are the host-to-runtime edge. Stdin/stdout is the
-runtime-to-worker edge inside the sandbox. The current implementation
-uses one worker subprocess per runtime; future worker topologies should
-not change this protocol's user-facing API.
+HTTP is only for health. Socket.IO is the host-to-runtime remote-call
+edge. Stdin/stdout is the runtime-to-worker edge inside the sandbox. The
+current implementation uses one worker subprocess per runtime; future
+worker topologies should not change this protocol's user-facing API.
 
 ## Shapes
 
@@ -56,37 +56,15 @@ regular `async def` returning an iterator value is unary.
 | stream | `async def f(...) -> AsyncIterator[T]: yield ...` | `Stream[T]` |
 | bidi | `async def f(..., inbox: Channel[I]) -> AsyncIterator[O]: yield ...` | `Bidi[I, O]` |
 
-## Unary HTTP
-
-Request body:
-
-```python
-{
-    "callable_payload": b"...pickle...",
-    "display_name": "my_project.tasks::run",
-    "shape": "unary",
-    "args": [],
-    "kwargs": {"seed": 42},
-    "call_id": "optional-correlation-key",
-}
-```
-
-Response body:
-
-```python
-{"ok": True, "value": {...}, "error": None}
-```
-
-Failures stay in-band:
-
-```python
-{"ok": False, "value": None, "error": {...}}
-```
-
-The HTTP status remains 200 when the remote callable raises or when the
-callable payload cannot be loaded.
-
 ## Socket.IO Events
+
+Unary:
+
+```text
+unary        {call_id, callable_payload, display_name, shape, args, kwargs}
+unary:result {call_id, value}
+unary:error  {call_id, error}
+```
 
 Stream:
 
@@ -184,8 +162,8 @@ Common framework errors:
 
 | Edge | Connect | Cleanup |
 | --- | --- | --- |
-| host -> runtime HTTP | per unary call | httpx closes |
-| host -> runtime Socket.IO | lazy on first stream/bidi call | `RuntimeClient.close()` disconnects |
+| host -> runtime HTTP | per health check | httpx closes |
+| host -> runtime Socket.IO | lazy on first remote call | `RuntimeClient.close()` disconnects |
 | runtime -> worker | lazy on first remote call | `SHUTDOWN`, wait, terminate/kill fallback |
 
 ## Out of Scope

@@ -1,4 +1,4 @@
-"""Runtime worker client — one worker subprocess for all remote targets.
+"""Runtime worker client — one worker subprocess for remote callables.
 
 This module bridges FastAPI/Socket.IO handlers to the worker process. It owns
 one worker subprocess per runtime server process, routes calls by `call_id`,
@@ -18,7 +18,7 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any, Protocol
 
-from agentix.invoke import FunctionInvoker
+from agentix.runtime.invoke import CallableInvoker
 from agentix.runtime.shared import frames as F
 from agentix.runtime.shared.callables import load_callable
 from agentix.runtime.shared.framing import read_frame, write_frame
@@ -69,7 +69,7 @@ class _InProcessWorker:
     """Test worker that invokes the serialized callable in-process."""
 
     def __init__(self) -> None:
-        self._invoker = FunctionInvoker()
+        self._invoker = CallableInvoker()
 
     def _callable_or_error(self, request: RemoteRequest) -> tuple[Any | None, RemoteError | None]:
         try:

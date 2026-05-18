@@ -3,7 +3,7 @@ from __future__ import annotations
 import inspect
 from typing import Any
 
-from agentix.invoke import detect_shape
+from agentix.runtime.invoke import detect_declared_shape
 from agentix.runtime.shared.callables import display_name_for, dump_callable
 from agentix.runtime.shared.models import RemoteRequest
 
@@ -19,7 +19,7 @@ def request_for(
     return RemoteRequest(
         callable_payload=dump_callable(fn),
         display_name=display_name_for(fn),
-        shape=detect_shape(fn, sig),
+        shape=detect_declared_shape(fn, sig),
         args=args or [],
         kwargs=kwargs or {},
         call_id=call_id,

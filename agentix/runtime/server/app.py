@@ -4,8 +4,7 @@ Runs remote calls through one runtime worker subprocess.
 
 Endpoints:
 
-- `POST /_remote` — typed unary calls (one request -> one response)
-- Socket.IO at `/socket.io/` — server-streaming + bidi, correlated by
+- Socket.IO at `/socket.io/` — unary, server-streaming, and bidi calls correlated by
   `call_id`
 - `GET /health`
 
@@ -20,13 +19,12 @@ import logging
 import os
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI
 
 from agentix import __version__
 from agentix.runtime.server.sio import make_sio
 from agentix.runtime.server.worker_client import RuntimeWorkerClient
-from agentix.runtime.shared.codec import pack, unpack
-from agentix.runtime.shared.models import HealthResponse, RemoteRequest
+from agentix.runtime.shared.models import HealthResponse
 
 logger = logging.getLogger("agentix.runtime")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message)s")
@@ -57,28 +55,7 @@ async def health() -> HealthResponse:
     return HealthResponse(version=__version__)
 
 
-# ── Remote calls ────────────────────────────────────────────────
-
-
-@_fastapi_app.post("/_remote")
-async def remote_call(request: Request) -> Response:
-    """Unary remote-call endpoint. Spawns the worker on first call.
-
-    Body: msgpack-encoded `{"callable_payload", "display_name", "shape", "args", "kwargs", "call_id"}`.
-    Response: msgpack-encoded `RemoteResponse` dict. Always 200 — error
-    info lives in the response body (`{"ok": false, "error": {...}}`).
-    Streaming + bidi methods live on the Socket.IO connection instead.
-    """
-    body = await request.body()
-    raw = unpack(body)
-    req = RemoteRequest.model_validate(raw)
-    worker: RuntimeWorkerClient = _fastapi_app.state.worker
-    resp = await worker.call_unary(req)
-    return Response(content=pack(resp.model_dump(mode="python")),
-                    media_type="application/msgpack")
-
-
-# ── Compose ASGI app: FastAPI for HTTP, Socket.IO for streams ──
+# ── Compose ASGI app: FastAPI health + Socket.IO remote calls ──
 #
 # The combined ASGI app is what uvicorn runs as
 # `agentix.runtime.server:app`. `socketio.ASGIApp` routes `/socket.io/*`

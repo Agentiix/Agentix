@@ -52,8 +52,8 @@ becomes this wire payload:
 }
 ```
 
-Unary calls use HTTP `POST /_remote`. Streaming and bidirectional calls
-use Socket.IO events on the same runtime server.
+Unary, streaming, and bidirectional calls use Socket.IO events on the
+same runtime server. HTTP is only used for `/health`.
 
 ## Call Shapes
 
@@ -61,7 +61,7 @@ The function signature determines how the client behaves.
 
 | Function shape | Client usage | Transport |
 | --- | --- | --- |
-| `async def f(...) -> T` | `await client.remote(f, ...)` | HTTP |
+| `async def f(...) -> T` | `await client.remote(f, ...)` | Socket.IO unary |
 | `async def f(...) -> AsyncIterator[T]` | `async for item in client.remote(f, ...)` | Socket.IO stream |
 | `async def f(..., inbox: Channel[I]) -> AsyncIterator[T]` | send inputs through `Channel`, receive with `async for` | Socket.IO bidi |
 

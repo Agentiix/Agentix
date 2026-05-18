@@ -1,12 +1,12 @@
 """Sandbox-side runtime server.
 
-Composes FastAPI (for HTTP unary `/_remote`) and Socket.IO (for streams
-+ bidi) into the ASGI app uvicorn runs. Remote calls route to one
+Composes FastAPI (for `/health`) and Socket.IO (for unary, stream, and
+bidi calls) into the ASGI app uvicorn runs. Remote calls route to one
 runtime worker subprocess.
 
 Submodules:
-  - `app`         — FastAPI app, lifespan, /_remote unary calls
-  - `sio`         — Socket.IO server + stream/bidi event handlers
+  - `app`         — FastAPI app, lifespan, /health
+  - `sio`         — Socket.IO server + remote-call event handlers
   - `worker_client` — server-side bridge to the worker process
   - `worker`        — worker subprocess entry point
 """

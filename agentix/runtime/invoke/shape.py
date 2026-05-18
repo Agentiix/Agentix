@@ -1,7 +1,7 @@
 """Callable-shape detection — `unary` / `stream` / `bidi`.
 
-The framework's three call shapes are exhaustive; adding a fourth means
-editing `detect_shape` plus the matching branches in `FunctionInvoker` /
+The framework's three declared call shapes are exhaustive; adding a fourth means
+editing `detect_declared_shape` plus the matching branches in `CallableInvoker` /
 `RuntimeClient`. No plugin extension hook — by design.
 """
 
@@ -23,8 +23,8 @@ Shape = Literal["unary", "stream", "bidi"]
 """
 
 
-def detect_shape(fn: Callable[..., Any], sig: inspect.Signature | None = None) -> Shape:
-    """Derive the wire shape from a callable and its signature.
+def detect_declared_shape(fn: Callable[..., Any], sig: inspect.Signature | None = None) -> Shape:
+    """Derive the declared wire shape from a callable and its signature.
 
     The runtime check (`inspect.isasyncgenfunction`) is the source of
     truth — an `async def ... yield` body is a real async generator, and
@@ -68,4 +68,4 @@ def _callable_impl(fn: Callable[..., Any]) -> Any:
     return inspect.unwrap(call) if call is not None else fn
 
 
-__all__ = ["Shape", "detect_shape"]
+__all__ = ["Shape", "detect_declared_shape"]

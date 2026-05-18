@@ -32,9 +32,9 @@ deployment backend implementing the `Deployment` Protocol. Everywhere
 else, prefer normal functions, Protocols, composition objects, or
 callbacks.
 
-A remote target is just a Python module exposing functions. There is no
-base class for user code to inherit from and no marker Protocol for
-users to import.
+A remote target is just a Python callable serialized by stdlib pickle.
+There is no base class for user code to inherit from and no marker
+Protocol for users to import.
 
 ## No Backward Compatibility Shims
 
@@ -53,11 +53,11 @@ Sibling repos (`Agentix-Runtime-Basic`, `Agentix-Deployment-*`,
 
 ```text
 agentix/
-├── invoke/              — internal function binding + call-shape detection
-│   ├── shape.py             — detect_shape (unary | stream | bidi)
-│   ├── bound.py             — _BoundMethod + arg coercion helper
-│   └── invoker.py           — FunctionInvoker
 ├── runtime/
+│   ├── invoke/              — internal callable binding + declared-shape detection
+│   │   ├── shape.py             — detect_declared_shape (unary | stream | bidi)
+│   │   ├── bound.py             — _BoundCallable + arg coercion helper
+│   │   └── invoker.py           — CallableInvoker
 │   ├── shared/              — wire types, codec, framing, event names
 │   ├── client/              — RuntimeClient
 │   └── server/              — FastAPI + Socket.IO + worker client + worker
@@ -67,15 +67,15 @@ agentix/
 
 One line per system:
 
-- **invoke** — resolves a function name on an imported module, compiles
-  pydantic adapters once, validates args, calls the function, and
-  serializes outputs.
+- **runtime.invoke** — inspects a pickle-resolved callable, compiles
+  pydantic adapters, validates args, calls the callable, and serializes
+  outputs.
 - **runtime.shared** — msgpack codec, length-prefixed worker frames,
   Socket.IO event names, pydantic wire models, and branded wire ids.
-- **runtime.client** — `RuntimeClient.remote(fn, ...)`; HTTP for unary,
-  Socket.IO for stream and bidi.
+- **runtime.client** — `RuntimeClient.remote(fn, ...)`; Socket.IO for unary,
+  stream, and bidi; HTTP only for health.
 - **runtime.server** — `agentix-server`; owns one runtime worker
-  process, forwards HTTP/Socket.IO calls, and correlates events by
+  process, forwards Socket.IO calls, and correlates events by
   `call_id`.
 - **deployment** — host-side `Deployment` Protocol and backend lookup
   for `agentix deploy <backend>`.
@@ -83,11 +83,8 @@ One line per system:
 
 ## Remote Call Implementation
 
-`c.remote(fn, ...)` reads exactly two attributes of `fn`:
-
-```python
-target = f"{fn.__module__}::{fn.__name__}"
-```
+`c.remote(fn, ...)` serializes `fn` with stdlib pickle and sends that
+callable payload to the runtime.
 
 Example:
 
@@ -102,20 +99,21 @@ from my_project.tasks import run
 result = await client.remote(run, seed=42)
 ```
 
-The HTTP/Socket.IO payload carries:
+The Socket.IO payload carries:
 
 ```python
 {
-    "target": "my_project.tasks::run",
+    "callable_payload": b"...pickle...",
+    "display_name": "my_project.tasks::run",
+    "shape": "unary",
     "args": [],
     "kwargs": {"seed": 42},
     "call_id": "optional-correlation-key",
 }
 ```
 
-The worker splits the target, imports `my_project.tasks`, resolves
-`run`, validates args with pydantic, calls the function, and serializes
-the result.
+The worker unpickles the callable, validates args with pydantic, calls
+the callable, and serializes the result.
 
 ## Call Shapes
 
@@ -161,22 +159,23 @@ importable by the worker.
 
 ## Wire Protocol
 
-Unary uses `POST /_remote`:
+Unary uses Socket.IO:
 
 ```text
-request  msgpack({target, args, kwargs, call_id})
-response msgpack({ok, value, error})
+unary        {call_id, callable_payload, display_name, shape, args, kwargs}
+unary:result {call_id, value}
+unary:error  {call_id, error}
 ```
 
 Stream and bidi use Socket.IO events:
 
 ```text
-stream       {call_id, target, args, kwargs}
+stream       {call_id, callable_payload, display_name, shape, args, kwargs}
 stream:item  {call_id, value}
 stream:end   {call_id}
 stream:error {call_id, error}
 
-bidi:start   {call_id, target, args, kwargs}
+bidi:start   {call_id, callable_payload, display_name, shape, args, kwargs}
 bidi:in      {call_id, item}
 bidi:end_in  {call_id}
 bidi:out     {call_id, value}
@@ -184,5 +183,5 @@ bidi:end     {call_id}
 bidi:error   {call_id, error}
 ```
 
-Errors stay in-band: HTTP remains 200 for unary, and Socket.IO emits an
-error event for stream and bidi.
+Errors stay in-band: Socket.IO emits an error event for unary, stream,
+and bidi.

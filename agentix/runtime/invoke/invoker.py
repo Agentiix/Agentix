@@ -1,4 +1,4 @@
-"""`FunctionInvoker` — validates and invokes remote callables.
+"""`CallableInvoker` — validates and invokes remote callables.
 
 The runtime receives a pickle-serialized callable, resolves its
 signature, builds pydantic adapters, coerces wire args, calls the
@@ -16,8 +16,8 @@ from typing import Any, get_args
 
 from pydantic import TypeAdapter, ValidationError
 
-from agentix.invoke.bound import _BoundMethod, coerce_args
-from agentix.invoke.shape import detect_shape
+from agentix.runtime.invoke.bound import _BoundCallable, coerce_args
+from agentix.runtime.invoke.shape import detect_declared_shape
 from agentix.runtime.shared.models import (
     RemoteError,
     RemoteRequest,
@@ -25,19 +25,19 @@ from agentix.runtime.shared.models import (
 )
 from agentix.runtime.shared.rpc import is_channel_annotation
 
-logger = logging.getLogger("agentix.invoke")
+logger = logging.getLogger("agentix.runtime.invoke")
 
 
-class FunctionInvoker:
+class CallableInvoker:
     """Call one pickle-resolved Python callable."""
 
-    def _build(self, name: str, fn: Any) -> _BoundMethod[Any, Any]:
+    def _build(self, name: str, fn: Any) -> _BoundCallable[Any, Any]:
         # eval_str=True resolves PEP 563 stringified annotations
         # (`from __future__ import annotations` in the module) — without
         # it, `param.annotation` would be a string and `get_origin` would
         # return None, mis-classifying streams as unary.
         sig = inspect.signature(fn, eval_str=True)
-        shape = detect_shape(fn, sig)
+        shape = detect_declared_shape(fn, sig)
 
         param_adapters: dict[str, TypeAdapter[Any]] = {}
         channel_params: list[tuple[str, Any]] = []
@@ -68,7 +68,7 @@ class FunctionInvoker:
                 input_channel_param, input_item_type = channel_params[0]
                 input_item_adapter = TypeAdapter(input_item_type)
 
-        return _BoundMethod(
+        return _BoundCallable(
             name=name,
             stub=fn,
             impl=fn,
@@ -240,4 +240,4 @@ def _shape_error(display_name: str, expected: str, actual: str) -> RemoteError:
     )
 
 
-__all__ = ["FunctionInvoker"]
+__all__ = ["CallableInvoker"]

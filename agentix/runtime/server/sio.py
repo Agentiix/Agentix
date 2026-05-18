@@ -7,6 +7,7 @@ clients send bytes, server receives bytes, vice versa.
 Wire (Socket.IO event names + payload dicts):
 
   client → server:
+    "unary"        {call_id, callable_payload, display_name, shape, args, kwargs}
     "stream"       {call_id, callable_payload, display_name, shape, args, kwargs}
     "bidi:start"   {call_id, callable_payload, display_name, shape, args, kwargs}
     "bidi:in"      {call_id, item}
@@ -14,6 +15,8 @@ Wire (Socket.IO event names + payload dicts):
     "cancel"       {call_id}
 
   server → client:
+    UNARY_RESULT   {call_id, value}
+    UNARY_ERROR    {call_id, error}
     STREAM_ITEM    {call_id, value}
     STREAM_END     {call_id}
     STREAM_ERROR   {call_id, error}
@@ -49,6 +52,9 @@ from agentix.runtime.shared.events import (
     STREAM_END,
     STREAM_ERROR,
     STREAM_ITEM,
+    UNARY,
+    UNARY_ERROR,
+    UNARY_RESULT,
 )
 from agentix.runtime.shared.idents import CallId
 from agentix.runtime.shared.models import RemoteError, RemoteRequest
@@ -128,6 +134,46 @@ def make_sio(
             + [c.pump for c in sess.calls.values() if c.pump is not None],
         )
         logger.debug("sio disconnect %s", sid)
+
+    # ── unary ────────────────────────────────────────────────────
+
+    @_event(UNARY)
+    async def on_unary(sid: str, data: Any) -> None:
+        sess = sessions.get(sid)
+        if sess is None:
+            return
+        payload = _u(data)
+        call_id = payload.get("call_id")
+        if not isinstance(call_id, str):
+            await sio.emit(UNARY_ERROR, pack({
+                "call_id": "", "error": {"type": "BadRequest", "message": "missing call_id"},
+            }), to=sid)
+            return
+
+        async def _drive() -> None:
+            try:
+                request = RemoteRequest(
+                    callable_payload=payload["callable_payload"],
+                    display_name=payload["display_name"],
+                    shape=payload["shape"],
+                    args=payload.get("args") or [],
+                    kwargs=payload.get("kwargs") or {},
+                    call_id=CallId(call_id),
+                )
+            except (KeyError, ValidationError) as exc:
+                await sio.emit(UNARY_ERROR, pack({
+                    "call_id": call_id,
+                    "error": RemoteError(type=type(exc).__name__, message=str(exc)).model_dump(),
+                }), to=sid)
+                return
+            resp = await worker.call_unary(request)
+            if resp.ok:
+                await sio.emit(UNARY_RESULT, pack({"call_id": call_id, "value": resp.value}), to=sid)
+            else:
+                error = (resp.error or RemoteError(type="Unknown", message="")).model_dump()
+                await sio.emit(UNARY_ERROR, pack({"call_id": call_id, "error": error}), to=sid)
+
+        await _spawn_call(sess, call_id, _drive(), error_event=UNARY_ERROR)
 
     # ── server-streaming ─────────────────────────────────────────
 
@@ -288,11 +334,16 @@ def make_sio(
     # ── helpers (closure over sio + sessions) ────────────────────
 
     async def _spawn_call(
-        sess: _SessionState, call_id: str, coro, *, state: _CallState | None = None,
+        sess: _SessionState,
+        call_id: str,
+        coro,
+        *,
+        state: _CallState | None = None,
+        error_event: str = STREAM_ERROR,
     ) -> None:
         task = asyncio.create_task(coro)
         if state is None:
-            state = _CallState(task=task, error_event=STREAM_ERROR)
+            state = _CallState(task=task, error_event=error_event)
         else:
             state.task = task
         sess.calls[call_id] = state

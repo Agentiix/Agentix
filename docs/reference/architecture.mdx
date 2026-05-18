@@ -11,7 +11,7 @@ Host Python
         |
         v
 Sandbox runtime server
-  HTTP or Socket.IO endpoint
+  Socket.IO endpoint
         |
         v
 Worker subprocess
@@ -27,7 +27,7 @@ Everything else supports that loop.
 
 | System | Responsibility |
 | --- | --- |
-| `agentix.invoke` | Resolve target functions, detect call shapes, bind and validate args, serialize outputs |
+| `agentix.runtime.invoke` | Inspect pickle-resolved callables, detect declared call shapes, bind and validate args, serialize outputs |
 | `agentix.runtime.shared` | Wire models, msgpack codec, framing, Socket.IO event names |
 | `agentix.runtime.client` | `RuntimeClient.remote(fn, ...)` and transport-specific client behavior |
 | `agentix.runtime.server` | FastAPI and Socket.IO server, worker process management, call correlation |
@@ -44,14 +44,14 @@ from app import run
 result = await client.remote(run, input="hello")
 ```
 
-The client builds the target string from the function object:
+The client serializes the function object with stdlib pickle:
 
 ```python
-target = f"{run.__module__}::{run.__name__}"
+callable_payload = pickle.dumps(run)
 ```
 
-The runtime worker splits the target, imports the module inside the
-sandbox, resolves the function by name, and invokes it.
+The runtime worker unpickles the callable inside the sandbox, validates
+the provided arguments, and invokes it.
 
 ## Call Flow
 
@@ -71,7 +71,7 @@ sandbox, resolves the function by name, and invokes it.
 
 | Call shape | Function shape | Transport | Client behavior |
 | --- | --- | --- | --- |
-| Unary | `async def f(...) -> T` or sync `def f(...) -> T` | HTTP `POST /_remote` | `await client.remote(f, ...)` |
+| Unary | `async def f(...) -> T` or sync `def f(...) -> T` | Socket.IO | `await client.remote(f, ...)` |
 | Stream | `async def f(...) -> AsyncIterator[T]` | Socket.IO | `async for item in client.remote(f, ...)` |
 | Bidi | `async def f(..., inbox: Channel[I]) -> AsyncIterator[T]` | Socket.IO | send through `Channel`, receive with `async for` |
 

@@ -177,7 +177,7 @@ Agentix supports three call shapes:
 
 | Function shape | Transport | Client usage |
 | --- | --- | --- |
-| normal async function | HTTP `POST /_remote` | `await client.remote(fn, ...)` |
+| normal async function | Socket.IO unary event | `await client.remote(fn, ...)` |
 | async generator | Socket.IO stream | `async for item in client.remote(fn, ...)` |
 | async generator with `Channel[T]` input | Socket.IO bidi | send through `Channel`, receive with `async for` |
 

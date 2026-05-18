@@ -1,8 +1,8 @@
 """Runtime transport wire types.
 
-Every type here is part of the HTTP / Socket.IO surface between
-`RuntimeClient` (orchestrator side) and the runtime server (sandbox
-side). Both client and server import from here.
+Every type here is part of the runtime wire surface between
+`RuntimeClient` (orchestrator side), the runtime server (sandbox side),
+and the worker subprocess. Both client and server import from here.
 """
 
 from __future__ import annotations
@@ -52,7 +52,7 @@ class RemoteError(BaseModel):
 
 
 class RemoteResponse(BaseModel):
-    """POST /_remote response."""
+    """Internal unary worker response."""
 
     ok: bool
     value: Any = None

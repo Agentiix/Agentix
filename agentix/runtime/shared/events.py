@@ -12,6 +12,11 @@ is needed (currently it isn't).
 
 from __future__ import annotations
 
+# Unary call (one request -> one output value)
+UNARY = "unary"
+UNARY_RESULT = "unary:result"
+UNARY_ERROR = "unary:error"
+
 # Server-streaming call (one request → many output items)
 STREAM = "stream"
 STREAM_ITEM = "stream:item"

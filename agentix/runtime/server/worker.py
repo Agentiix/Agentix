@@ -12,7 +12,7 @@ import sys
 import traceback
 from typing import Any
 
-from agentix.invoke import FunctionInvoker
+from agentix.runtime.invoke import CallableInvoker
 from agentix.runtime.shared import frames as F
 from agentix.runtime.shared import pump as _pump
 from agentix.runtime.shared.callables import load_callable
@@ -35,7 +35,7 @@ class Worker:
     """One process serving remote callable invocations."""
 
     def __init__(self) -> None:
-        self._invoker = FunctionInvoker()
+        self._invoker = CallableInvoker()
         self._calls: dict[str, asyncio.Task] = {}
         self._bidi_queues: dict[str, asyncio.Queue] = {}
         self._bidi_intakes: dict[str, asyncio.Queue] = {}

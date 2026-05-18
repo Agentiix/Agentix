@@ -1,6 +1,6 @@
 """Wire codec — msgpack with extension types.
 
-Every RPC frame, HTTP `/_remote` body, and Socket.IO event payload flows
+Every worker frame and Socket.IO event payload flows
 through `pack(obj)` / `unpack(bytes)`. The goal is: cross-language wire
 format, native binary types (no base64), small + fast, and
 round-trippable Python types via msgpack extension types.
@@ -13,7 +13,7 @@ Extension types registered:
   * `_EXT_PYDANTIC` (2) — pydantic `BaseModel` instances. Encoded as
     `(qualname, model_dump(mode="python") packed)`. On the receiving
     side the qualname is informational; the decoded dict is what the
-    FunctionInvoker feeds into `TypeAdapter.validate_python`.
+    runtime callable invoker feeds into `TypeAdapter.validate_python`.
 
 Numpy is optional — if it's not installed, the ndarray hook is just
 skipped (the type never appears on the wire). pydantic is a hard dep

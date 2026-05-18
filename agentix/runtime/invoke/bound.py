@@ -1,6 +1,6 @@
-"""`_BoundMethod` record + the kwargs coercion helper.
+"""`_BoundCallable` record + the kwargs coercion helper.
 
-Internal to `agentix.invoke` — the public surface is `FunctionInvoker`.
+Internal to `agentix.runtime.invoke` — the package surface is `CallableInvoker`.
 """
 
 from __future__ import annotations
@@ -12,14 +12,14 @@ from typing import Any, Generic, ParamSpec, TypeVar
 
 from pydantic import TypeAdapter
 
-from agentix.invoke.shape import Shape
+from agentix.runtime.invoke.shape import Shape
 
 P = ParamSpec("P")
 R = TypeVar("R")
 
 
 @dataclass
-class _BoundMethod(Generic[P, R]):
+class _BoundCallable(Generic[P, R]):
     name: str
     stub: Callable[P, R]
     impl: Callable[..., Any]
@@ -42,7 +42,7 @@ class _BoundMethod(Generic[P, R]):
 
 
 def coerce_args(
-    m: _BoundMethod[Any, Any],
+    m: _BoundCallable[Any, Any],
     args: list[Any],
     kwargs: dict[str, Any],
 ) -> tuple[list[Any], dict[str, Any]]:
@@ -77,4 +77,4 @@ def coerce_args(
     return out_args, out_kwargs
 
 # Internal — nothing here is part of the public remote-call API.
-# `FunctionInvoker` (in invoker.py) is the only consumer.
+# `CallableInvoker` (in invoker.py) is the only consumer.
