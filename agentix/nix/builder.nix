@@ -57,15 +57,33 @@ in
 pkgs.dockerTools.streamLayeredImage {
   inherit name tag;
 
+  # `contents` pulls `joined`'s closure into the image's /nix/store. The
+  # default behaviour also surfaces /bin etc. at the image root from
+  # `joined`; that's harmless for standalone `docker run` and is ignored
+  # by the deployment paths (both `--mount type=image,subpath=nix` and
+  # `--volumes-from` consume only `/nix`).
   contents = [ joined ];
 
+  # Stable entry path inside the image's /nix tree. Deployments mount
+  # /nix into the task container (subpath=nix or volumes-from); the same
+  # absolute path resolves in both cases.
+  extraCommands = ''
+    mkdir -p nix/runtime/bin
+    for f in ${joined}/bin/*; do
+      ln -s "$(readlink -f "$f")" nix/runtime/bin/$(basename "$f")
+    done
+  '';
+
   config = {
-    Entrypoint = [ "${pythonEnv}/bin/${entryPoint}" ];
+    Entrypoint = [ "/nix/runtime/bin/${entryPoint}" ];
     Env = [
-      "PATH=${joined}/bin"
+      "PATH=/nix/runtime/bin"
       # Agentix server reads this; deployments override per sandbox.
       "AGENTIX_BIND_PORT=8000"
     ];
     ExposedPorts = { "8000/tcp" = { }; };
+    # Declared so `--volumes-from <carrier>:ro` exposes /nix to the task
+    # container when `--mount type=image,subpath=nix` is unavailable.
+    Volumes = { "/nix" = { }; };
   };
 }
