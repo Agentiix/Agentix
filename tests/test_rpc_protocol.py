@@ -1,7 +1,7 @@
-"""Protocol-level integration tests for callable remote calls.
+"""Protocol-level integration tests for remote calls.
 
-These tests drive the runtime server over Socket.IO while using the
-in-process worker backend. Subprocess stdio is covered separately in
+Drives the runtime server over Socket.IO using the in-process worker
+backend. Subprocess stdio is covered separately in
 `test_worker_subprocess.py`.
 """
 
@@ -14,9 +14,9 @@ import httpx
 import pytest
 import socketio
 
-from agentix import Channel, RemoteCallError, RuntimeClient
+from agentix import RemoteCallError, RuntimeClient
 from agentix.runtime.shared.codec import pack, unpack
-from agentix.runtime.shared.events import CANCEL, STREAM, STREAM_ERROR, UNARY, UNARY_ERROR, UNARY_RESULT
+from agentix.runtime.shared.events import CALL, CALL_ERROR, CALL_RESULT, CANCEL
 from agentix.runtime.shared.models import RemoteRequest
 from tests import _worker_target as target
 from tests._rpc_helpers import request_for
@@ -24,7 +24,7 @@ from tests._rpc_helpers import request_for
 pytestmark = pytest.mark.asyncio
 
 
-# ── unary basics ───────────────────────────────────────────────────────
+# ── basics ─────────────────────────────────────────────────────────────
 
 
 async def test_http_remote_endpoint_is_not_registered(runtime_module):
@@ -36,7 +36,7 @@ async def test_http_remote_endpoint_is_not_registered(runtime_module):
     assert r.status_code == 404
 
 
-async def test_socketio_unary_calls_serialized_callable(use_inprocess_worker, live_server):
+async def test_socketio_call_serialized_callable(use_inprocess_worker, live_server):
     use_inprocess_worker()
     base_url = await live_server()
     sio = socketio.AsyncClient()
@@ -45,19 +45,22 @@ async def test_socketio_unary_calls_serialized_callable(use_inprocess_worker, li
     async def _on_result(data):
         await results.put(unpack(data))
 
-    sio.on(UNARY_RESULT, _on_result)
+    sio.on(CALL_RESULT, _on_result)
     await sio.connect(base_url)
     try:
-        req = request_for(target.echo, kwargs={"msg": "hi"}, call_id="unary-ok")
-        await sio.emit(UNARY, pack(req.model_dump()))
+        req = request_for(target.echo, kwargs={"msg": "hi"}, call_id="call-ok")
+        await sio.emit(CALL, pack(req.model_dump()))
         payload = await asyncio.wait_for(results.get(), timeout=5)
     finally:
         await sio.disconnect()
 
-    assert payload == {"call_id": "unary-ok", "value": {"msg": "echo:hi"}}
+    assert payload["call_id"] == "call-ok"
+    import pickle
+    result = pickle.loads(payload["value"])
+    assert result.msg == "echo:hi"
 
 
-async def test_socketio_unary_bad_callable_payload_returns_error(use_inprocess_worker, live_server):
+async def test_socketio_bad_callable_returns_error(use_inprocess_worker, live_server):
     use_inprocess_worker()
     base_url = await live_server()
     sio = socketio.AsyncClient()
@@ -66,22 +69,26 @@ async def test_socketio_unary_bad_callable_payload_returns_error(use_inprocess_w
     async def _on_error(data):
         await errors.put(unpack(data))
 
-    sio.on(UNARY_ERROR, _on_error)
+    sio.on(CALL_ERROR, _on_error)
     await sio.connect(base_url)
     try:
+        import pickle
+
+        from agentix.runtime.shared.callables import RemoteCallable
+        # Garbage base64 that can't be decoded into a callable.
         req = RemoteRequest(
-            callable_payload=b"not-a-pickle",
-            display_name="bad",
-            shape="unary",
-            call_id="unary-bad",
+            callable=RemoteCallable("not-valid-base64-pickle"),
+            arguments=pickle.dumps(((), {})),
+            call_id="call-bad",
         )
-        await sio.emit(UNARY, pack(req.model_dump()))
+        await sio.emit(CALL, pack(req.model_dump()))
         payload = await asyncio.wait_for(errors.get(), timeout=5)
     finally:
         await sio.disconnect()
 
-    assert payload["call_id"] == "unary-bad"
-    assert payload["error"]["type"] in {"UnpicklingError", "ValueError"}
+    assert payload["call_id"] == "call-bad"
+    # b64decode can raise binascii.Error or pickle can raise UnpicklingError.
+    assert payload["error"]["type"] in {"UnpicklingError", "ValueError", "Error", "EOFError"}
 
 
 async def test_client_remote_round_trip(use_inprocess_worker, live_server):
@@ -103,10 +110,12 @@ async def test_client_remote_raises_on_impl_error(use_inprocess_worker, live_ser
 # ── seamless callable forms ────────────────────────────────────────────
 
 
-async def test_remote_rejects_unpickleable_lambda(use_inprocess_worker, live_server):
+async def test_remote_rejects_unimportable_lambda(use_inprocess_worker, live_server):
     use_inprocess_worker()
     base_url = await live_server()
     async with RuntimeClient(base_url) as c:
+        # pickle can't serialize a local lambda, so the host-side
+        # `RemoteCallable._resolve(fn)` raises before the call leaves.
         with pytest.raises(Exception):
             await c.remote(lambda x: x + 1, 41)
 
@@ -135,27 +144,11 @@ async def test_remote_accepts_callable_instance(use_inprocess_worker, live_serve
     assert result.msg == "instance:hello"
 
 
-# ── streaming + bidi ───────────────────────────────────────────────────
+# ── cancel ────────────────────────────────────────────────────────────
 
 
-async def test_stream_round_trip_via_socketio(use_inprocess_worker, live_server):
-    use_inprocess_worker()
-    base_url = await live_server()
-    async with RuntimeClient(base_url) as c:
-        items = [t async for t in c.remote(target.counter, n=2)]
-    assert items == [0, 1]
-
-
-async def test_stream_call_context_uses_routable_call_id(use_inprocess_worker, live_server):
-    use_inprocess_worker()
-    base_url = await live_server()
-    async with RuntimeClient(base_url) as c:
-        with c.call_context(call_id="ctx-stream"):
-            items = [t async for t in c.remote(target.counter, n=1)]
-    assert items == [0]
-
-
-async def test_socketio_cancel_gets_cancelled_error_ack(use_inprocess_worker, live_server):
+async def test_socketio_cancel_returns_cancelled_error(use_inprocess_worker, live_server):
+    """Cancelling an in-flight call yields a Cancelled error."""
     use_inprocess_worker()
     base_url = await live_server()
     sio = socketio.AsyncClient()
@@ -164,14 +157,23 @@ async def test_socketio_cancel_gets_cancelled_error_ack(use_inprocess_worker, li
     async def _on_error(data):
         await errors.put(unpack(data))
 
-    sio.on(STREAM_ERROR, _on_error)
+    sio.on(CALL_ERROR, _on_error)
     await sio.connect(base_url)
     try:
-        call_id = "cancel-me"
-        req = request_for(target.slow_counter, call_id=call_id)
-        await sio.emit(STREAM, pack(req.model_dump()))
-        await asyncio.sleep(0.05)
-        await sio.emit(CANCEL, pack({"call_id": call_id}))
+        # Use a slow remote call. asyncio.sleep is convenient — it's
+        # importable and async; we just need it to outlast the cancel.
+        import asyncio as _asyncio
+        import pickle
+
+        from agentix.runtime.shared.callables import RemoteCallable
+        req = RemoteRequest(
+            callable=RemoteCallable._resolve(_asyncio.sleep),
+            arguments=pickle.dumps(((5.0,), {})),
+            call_id="cancel-me",
+        )
+        await sio.emit(CALL, pack(req.model_dump()))
+        await asyncio.sleep(0.1)
+        await sio.emit(CANCEL, pack({"call_id": "cancel-me"}))
         payload = await asyncio.wait_for(errors.get(), timeout=5)
     finally:
         await sio.disconnect()
@@ -179,38 +181,3 @@ async def test_socketio_cancel_gets_cancelled_error_ack(use_inprocess_worker, li
     assert payload["call_id"] == "cancel-me"
     assert payload["error"]["type"] == "Cancelled"
     assert payload["error"]["cancelled"] is True
-
-
-async def test_bidi_round_trip_via_socketio(use_inprocess_worker, live_server):
-    use_inprocess_worker()
-    base_url = await live_server()
-    inbox: Channel[target.UserMsg] = Channel()
-
-    async def _push() -> None:
-        for text in ("hi", "there"):
-            await inbox.send(target.UserMsg(text=text))
-        await inbox.close()
-
-    async with RuntimeClient(base_url) as c:
-        producer = asyncio.create_task(_push())
-        replies = [r async for r in c.remote(target.chat, messages=inbox)]
-        await producer
-
-    assert [r.text for r in replies] == ["say:hi", "say:there"]
-
-
-async def test_bidi_accepts_positional_channel_arg(use_inprocess_worker, live_server):
-    use_inprocess_worker()
-    base_url = await live_server()
-    inbox: Channel[target.UserMsg] = Channel()
-
-    async def _push() -> None:
-        await inbox.send(target.UserMsg(text="positional"))
-        await inbox.close()
-
-    async with RuntimeClient(base_url) as c:
-        producer = asyncio.create_task(_push())
-        replies = [r async for r in c.remote(target.chat, inbox)]
-        await producer
-
-    assert [r.text for r in replies] == ["say:positional"]

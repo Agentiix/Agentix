@@ -7,15 +7,29 @@ Ship agents like software. Run them like experiments.
 
 Agentix turns any importable Python function into a sandboxed rollout
 primitive. Your trainer, evaluator, or orchestration script passes a
-function object. Agentix runs that function inside an isolated runtime
-image and gives the typed result back.
+function object. `agentix build` packages that code and its
+dependencies into a runtime image; Agentix then overlays that runtime
+onto a task image and gives the typed result back.
+
+```bash
+cd examples/hello-agentix
+uv sync
+uv run agentix build . --name hello-agentix  # builds hello-agentix:0.1.0
+uv run python run.py
+```
 
 ```python
-from agentix import RuntimeClient
-from app import run
+from agentix import RuntimeClient, SandboxConfig, session
+from agentix.bash import run
+from agentix.deployment.docker import DockerDeployment
 
-async with RuntimeClient(sandbox.runtime_url) as client:
-    result = await client.remote(run, input="hello")
+config = SandboxConfig(
+    image="python:3.13-slim",
+    runtime_image="hello-agentix:0.1.0",
+)
+async with session(DockerDeployment(), config) as sandbox:
+    async with RuntimeClient(sandbox.runtime_url) as client:
+        result = await client.remote(run, command="echo hello from $(uname -a)")
 ```
 
 The unit of composition is not a custom runner. It is a function.
@@ -59,27 +73,33 @@ Python, the host can call it.
 | Claude Code, Codex, Aider, OpenHands, or an internal agent | `async def run(...) -> RunResult` | `await client.remote(run, ...)` |
 | Bash, file operations, repo setup, or local tools | `async def run(command: str) -> BashResult` | `await client.remote(bash_run, ...)` |
 | SWE-bench, MLE-Bench, or an internal evaluator | `async def score(...) -> Score` | `await client.remote(score, ...)` |
-| A streaming agent or interactive tool | `async def run_stream(...) -> AsyncIterator[Event]` | `async for event in client.remote(run_stream, ...)` |
 
 ## Where It Sits
 
 ```text
 Trainer / evaluator / script
   imports a function
-  calls RuntimeClient.remote(fn, ...)
+  calls RuntimeClient.remote(fn, *args, **kwargs)
         |
         v
 Sandbox runtime image
   imports the same module
-  validates args
   runs the function in a worker process
-  returns typed values, stream items, or bidi events
+  returns the result
 ```
 
 The same pattern works for a toy function, a CLI-driven coding agent, a
 benchmark scorer, or a full RL rollout step.
 
 ## Example Rollout
+
+Start with the complete runnable demo in
+[`agentix-cookbook/examples/hello-agentix`](https://github.com/Agentiix/agentix-cookbook/tree/main/examples/hello-agentix):
+
+```bash
+uv run agentix build . --name hello-agentix
+uv run python run.py
+```
 
 This SWE-bench-shaped flow composes three independent packages in one
 sandbox: a shell primitive prepares the repo, an agent wrapper edits it,

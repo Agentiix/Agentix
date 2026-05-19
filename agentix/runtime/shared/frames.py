@@ -1,17 +1,13 @@
-"""Wire-frame type tags + call-kind tags for `agentix.runtime.shared.framing`.
+"""Wire-frame type tags for `agentix.runtime.shared.framing`.
 
-These are the values of the `type` (and `kind`) fields in msgpack frames
-flowing between the runtime server and worker subprocess over
-stdin/stdout. Keeping them in one place means a typo is an
-`AttributeError` at import time, not a silent protocol break at runtime.
+These are the values of the `type` field in msgpack frames flowing
+between the runtime server and worker subprocess over stdin/stdout.
 """
 
 from __future__ import annotations
 
 # ─── runtime → worker frame types ─────────────────────────────────────
 CALL = "call"
-BIDI_IN = "bidi_in"
-BIDI_END_IN = "bidi_end_in"
 CANCEL = "cancel"
 SHUTDOWN = "shutdown"
 
@@ -20,10 +16,7 @@ READY = "ready"
 BOOT_ERROR = "boot_error"
 RESULT = "result"
 ERROR = "error"
-STREAM_ITEM = "stream_item"
-STREAM_END = "stream_end"
-
-# ─── call kinds (the `kind` field of a `call` frame) ──────────────────
-KIND_UNARY = "unary"
-KIND_STREAM = "stream"
-KIND_BIDI = "bidi"
+# A side-channel payload from inside the worker. Today only the trace
+# bridge uses it (worker → server → broadcast SIO); the runtime ships
+# the inner dict opaquely and has no knowledge of its schema.
+TRACE = "trace"

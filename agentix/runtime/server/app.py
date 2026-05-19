@@ -4,13 +4,14 @@ Runs remote calls through one runtime worker subprocess.
 
 Endpoints:
 
-- Socket.IO at `/socket.io/` — unary, server-streaming, and bidi calls correlated by
-  `call_id`
 - `GET /health`
+- Socket.IO at `/socket.io/` — `call` / `call:result` / `call:error`,
+  `cancel`, plus broadcast `trace:event`.
 
-Remote requests carry a stdlib pickle-serialized callable. Module-level
-functions/classes and pickleable callable objects are the supported
-boundary.
+Remote requests carry a `RemoteCallable` (base64-pickled callable) plus
+a pickle of the (args, kwargs) tuple. Module-level functions/classes,
+bound methods, `functools.partial`, and pickleable callable instances
+are the supported boundary.
 """
 
 from __future__ import annotations

@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-import inspect
+import pickle
 from typing import Any
 
-from agentix.runtime.shared.callables import display_name_for, dump_callable
+from agentix.runtime.shared.callables import RemoteCallable
 from agentix.runtime.shared.models import RemoteRequest
-from agentix.runtime.shared.rpc import detect_declared_shape
 
 
 def request_for(
@@ -15,12 +14,8 @@ def request_for(
     kwargs: dict[str, Any] | None = None,
     call_id: str | None = None,
 ) -> RemoteRequest:
-    sig = inspect.signature(fn, eval_str=True)
     return RemoteRequest(
-        callable_payload=dump_callable(fn),
-        display_name=display_name_for(fn),
-        shape=detect_declared_shape(fn, sig),
-        args=args or [],
-        kwargs=kwargs or {},
+        callable=RemoteCallable._resolve(fn),
+        arguments=pickle.dumps((tuple(args or ()), dict(kwargs or {}))),
         call_id=call_id,
     )

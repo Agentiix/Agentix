@@ -2,24 +2,37 @@
 
 from __future__ import annotations
 
+import pickle
+
 import pytest
 
 from agentix.deployment.base import SandboxConfig
+from agentix.runtime.shared.callables import RemoteCallable
 from agentix.runtime.shared.models import RemoteError, RemoteRequest, RemoteResponse
 
 
-def test_remote_request_defaults():
-    r = RemoteRequest(callable_payload=b"payload", display_name="agentix.echo::echo", shape="unary")
-    assert r.args == []
-    assert r.kwargs == {}
-    assert r.callable_payload == b"payload"
-    assert r.display_name == "agentix.echo::echo"
-    assert r.shape == "unary"
+def _example_fn(a: int) -> int:
+    return a + 1
+
+
+def test_remote_request_round_trips():
+    args_payload = pickle.dumps(((1, 2), {"k": "v"}))
+    rc = RemoteCallable._resolve(_example_fn)
+    r = RemoteRequest(callable=rc, arguments=args_payload)
+    assert isinstance(r.callable, str)            # str subclass
+    assert r.callable.resolve()(2) == 3            # round-trip back to fn
+    assert pickle.loads(r.arguments) == ((1, 2), {"k": "v"})
+
+
+def test_remote_callable_rejects_non_callable():
+    with pytest.raises(TypeError):
+        RemoteCallable._resolve(42)  # type: ignore[arg-type]
 
 
 def test_remote_response_ok_shape():
-    resp = RemoteResponse(ok=True, value={"x": 1})
+    resp = RemoteResponse(ok=True, value=pickle.dumps({"x": 1}))
     assert resp.error is None
+    assert pickle.loads(resp.value) == {"x": 1}
 
 
 def test_remote_response_error_shape():

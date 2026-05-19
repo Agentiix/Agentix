@@ -6,30 +6,20 @@ import from here. Typing one of these strings inline in either file
 risks a silent client/server mismatch.
 
 Naming convention: the constant name mirrors the event-name string
-(`STREAM_ITEM` → `"stream:item"`). Use `EVENT_*` only if disambiguating
-is needed (currently it isn't).
+(`CALL_RESULT` → `"call:result"`).
 """
 
 from __future__ import annotations
 
-# Unary call (one request -> one output value)
-UNARY = "unary"
-UNARY_RESULT = "unary:result"
-UNARY_ERROR = "unary:error"
+# A remote call: one request → one return value (or one error).
+CALL = "call"
+CALL_RESULT = "call:result"
+CALL_ERROR = "call:error"
 
-# Server-streaming call (one request → many output items)
-STREAM = "stream"
-STREAM_ITEM = "stream:item"
-STREAM_END = "stream:end"
-STREAM_ERROR = "stream:error"
-
-# Bidirectional call (many input items → many output items, interleaved)
-BIDI_START = "bidi:start"
-BIDI_IN = "bidi:in"
-BIDI_END_IN = "bidi:end_in"
-BIDI_OUT = "bidi:out"
-BIDI_END = "bidi:end"
-BIDI_ERROR = "bidi:error"
-
-# Cancel an in-flight stream / bidi call by call_id.
+# Cancel an in-flight call by call_id.
 CANCEL = "cancel"
+
+# Trace stream — server broadcasts every worker-emitted trace frame to
+# all connected sessions as `trace:event`. There is no `subscribe` —
+# clients receive everything from the moment they connect.
+TRACE_EVENT = "trace:event"

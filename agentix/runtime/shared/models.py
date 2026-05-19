@@ -3,17 +3,20 @@
 Every type here is part of the runtime wire surface between
 `RuntimeClient` (orchestrator side), the runtime server (sandbox side),
 and the worker subprocess. Both client and server import from here.
+
+Wire encoding: every payload is a stdlib pickle blob. The runtime
+only ships Python callables — no cross-language clients — so pickle is
+the simplest faithful encoding for arbitrary Python objects (top-level
+functions, bound methods, `functools.partial`, callable instances,
+return values).
 """
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from pydantic import BaseModel
 
-from pydantic import BaseModel, Field, field_validator
-
+from agentix.runtime.shared.callables import RemoteCallable
 from agentix.runtime.shared.idents import CallId
-
-CallShape = Literal["unary", "stream", "bidi"]
 
 
 class HealthResponse(BaseModel):
@@ -22,26 +25,23 @@ class HealthResponse(BaseModel):
 
 
 class RemoteRequest(BaseModel):
-    """Remote call request.
+    """One remote call.
 
-    The callable itself is serialized with stdlib pickle. Module-level
-    functions/classes and pickleable callable objects are the supported
-    boundary; lambdas and local closures are intentionally out of scope.
+      - `callable`: a `RemoteCallable` (str subclass holding the
+        base64-pickle of the callable). `.resolve()` recovers the fn
+        on the worker; `RemoteCallable._resolve(fn)` builds one on the
+        host.
+      - `arguments`: pickle.dumps((args, kwargs)).
+
+    No display name on the wire — both ends compute it locally from
+    their fn reference for log lines and error messages.
     """
 
-    callable_payload: bytes
-    display_name: str
-    shape: CallShape
-    args: list[Any] = Field(default_factory=list)
-    kwargs: dict[str, Any] = Field(default_factory=dict)
-    call_id: CallId | None = None
+    model_config = {"arbitrary_types_allowed": True}
 
-    @field_validator("display_name")
-    @classmethod
-    def _validate_display_name(cls, value: str) -> str:
-        if not value:
-            raise ValueError("display_name must be non-empty")
-        return value
+    callable: RemoteCallable
+    arguments: bytes
+    call_id: CallId | None = None
 
 
 class RemoteError(BaseModel):
@@ -52,8 +52,8 @@ class RemoteError(BaseModel):
 
 
 class RemoteResponse(BaseModel):
-    """Internal unary worker response."""
+    """Internal worker response. `value` is a pickle blob on success."""
 
     ok: bool
-    value: Any = None
+    value: bytes | None = None
     error: RemoteError | None = None

@@ -1,10 +1,8 @@
 """Runtime worker client — one worker subprocess for remote callables.
 
-This module bridges FastAPI/Socket.IO handlers to the worker process. It owns
-one worker subprocess per runtime server process, routes calls by `call_id`,
-and shuts the worker down with the server. The current single-worker topology
-is intentionally hidden behind the `WorkerBackend` protocol so future pools or
-per-call isolation do not change `RuntimeClient.remote(fn, ...)`.
+Bridges the runtime server's Socket.IO handlers to the worker process.
+Owns one worker subprocess per server process, routes calls by `call_id`,
+shuts the worker down with the server.
 """
 
 from __future__ import annotations
@@ -14,13 +12,13 @@ import contextlib
 import logging
 import os
 import sys
-from collections.abc import AsyncIterator
+import uuid
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Protocol
 
 from agentix.runtime.server.worker.invoker import CallableInvoker
 from agentix.runtime.shared import frames as F
-from agentix.runtime.shared.callables import load_callable
 from agentix.runtime.shared.framing import read_frame, write_frame
 from agentix.runtime.shared.models import RemoteError, RemoteRequest, RemoteResponse
 
@@ -55,71 +53,48 @@ def _clean_worker_env(runtime_bin_dir: Path | None) -> dict[str, str]:
 
 
 class WorkerBackend(Protocol):
-    """Internal execution backend boundary for runtime call handling."""
+    """Internal execution backend boundary."""
 
-    async def call_unary(self, request: RemoteRequest) -> RemoteResponse: ...
-    def iter_stream(self, request: RemoteRequest) -> AsyncIterator[dict[str, Any]]: ...
-    def iter_bidi(
-        self, request: RemoteRequest, input_iter: AsyncIterator[Any],
-    ) -> AsyncIterator[dict[str, Any]]: ...
+    async def call(self, request: RemoteRequest) -> RemoteResponse: ...
     async def shutdown(self) -> None: ...
 
 
+TraceFrameHandler = Callable[[dict[str, Any]], None]
+"""Called from the worker read loop for each F.TRACE frame. The SIO
+layer installs one; the in-process backend has no transport hop."""
+
+
 class _InProcessWorker:
-    """Test worker that invokes the serialized callable in-process."""
+    """In-process worker: resolves and calls fn in the server's own loop.
+    Test fixture only — production routes through `_SubprocessWorker`."""
 
     def __init__(self) -> None:
         self._invoker = CallableInvoker()
 
-    def _callable_or_error(self, request: RemoteRequest) -> tuple[Any | None, RemoteError | None]:
+    def _resolve_or_error(self, request: RemoteRequest) -> tuple[Any | None, RemoteError | None]:
         try:
-            return load_callable(request.callable_payload), None
+            return request.callable.resolve(), None
         except Exception as exc:
             return None, RemoteError(type=type(exc).__name__, message=str(exc))
 
-    async def call_unary(self, request: RemoteRequest) -> RemoteResponse:
-        fn, err = self._callable_or_error(request)
+    async def call(self, request: RemoteRequest) -> RemoteResponse:
+        fn, err = self._resolve_or_error(request)
         if err is not None:
             return RemoteResponse(ok=False, error=err)
-        return await self._invoker.call_unary(fn, request)
-
-    async def iter_stream(self, request: RemoteRequest) -> AsyncIterator[dict[str, Any]]:
-        fn, err = self._callable_or_error(request)
-        if err is not None:
-            yield {"type": "error", "error": err.model_dump()}
-            return
-        async for ev in self._invoker.call_stream(fn, request):
-            yield ev
-
-    async def iter_bidi(
-        self, request: RemoteRequest, input_iter: AsyncIterator[Any],
-    ) -> AsyncIterator[dict[str, Any]]:
-        fn, err = self._callable_or_error(request)
-        if err is not None:
-            yield {"type": "error", "error": err.model_dump()}
-            return
-        adapter = self._invoker.input_adapter_for(fn, request)
-
-        async def _coerced():
-            async for raw in input_iter:
-                if adapter is not None:
-                    raw = adapter.validate_python(raw)
-                yield raw
-
-        async for ev in self._invoker.call_bidi(fn, request, _coerced()):
-            yield ev
+        return await self._invoker.call(fn, request)
 
     async def shutdown(self) -> None:
         return
 
 
 class _SubprocessWorker:
-    """Single subprocess worker for the runtime."""
+    """Single subprocess worker."""
 
     def __init__(
         self,
         python: str,
         runtime_bin_dir: Path | None = None,
+        trace_handler: TraceFrameHandler | None = None,
     ) -> None:
         self._python = python
         self._runtime_bin_dir = runtime_bin_dir
@@ -131,9 +106,9 @@ class _SubprocessWorker:
         self._read_task: asyncio.Task | None = None
         self._closed = asyncio.Event()
 
-        self._unary: dict[str, asyncio.Future] = {}
-        self._streams: dict[str, asyncio.Queue] = {}
+        self._pending: dict[str, asyncio.Future] = {}
         self._cancel_tasks: set[asyncio.Task] = set()
+        self._trace_handler = trace_handler
 
     async def start(self) -> None:
         env = _clean_worker_env(self._runtime_bin_dir)
@@ -192,12 +167,10 @@ class _SubprocessWorker:
         finally:
             self._closed.set()
             err = RemoteError(type="WorkerExited", message="runtime worker exited")
-            for fut in list(self._unary.values()):
+            for fut in list(self._pending.values()):
                 if not fut.done():
                     fut.set_exception(RuntimeError(err.message))
-            self._unary.clear()
-            for q in list(self._streams.values()):
-                q.put_nowait({"type": "error", "error": err.model_dump()})
+            self._pending.clear()
 
     def _on_frame(self, frame: dict[str, Any]) -> None:
         kind = frame.get("type")
@@ -208,28 +181,22 @@ class _SubprocessWorker:
             self._ready.set()
         elif kind == F.RESULT:
             cid = frame.get("call_id", "")
-            fut = self._unary.pop(cid, None)
+            fut = self._pending.pop(cid, None)
             if fut and not fut.done():
                 fut.set_result(RemoteResponse(ok=True, value=frame.get("value")))
         elif kind == F.ERROR:
             cid = frame.get("call_id", "")
             err_payload = frame.get("error") or {"type": "Unknown", "message": ""}
             err = RemoteError.model_validate(err_payload)
-            fut = self._unary.pop(cid, None)
+            fut = self._pending.pop(cid, None)
             if fut and not fut.done():
                 fut.set_result(RemoteResponse(ok=False, error=err))
-                return
-            q = self._streams.get(cid)
-            if q is not None:
-                q.put_nowait({"type": "error", "error": err_payload})
-        elif kind == F.STREAM_ITEM:
-            q = self._streams.get(frame.get("call_id", ""))
-            if q is not None:
-                q.put_nowait({"type": "item", "value": frame.get("value")})
-        elif kind == F.STREAM_END:
-            q = self._streams.get(frame.get("call_id", ""))
-            if q is not None:
-                q.put_nowait({"type": "end"})
+        elif kind == F.TRACE:
+            if self._trace_handler is not None:
+                try:
+                    self._trace_handler(frame.get("frame") or {})
+                except Exception:
+                    logger.debug("trace handler raised; dropping", exc_info=True)
         else:
             logger.warning("runtime worker: unknown frame %r", kind)
 
@@ -238,16 +205,12 @@ class _SubprocessWorker:
         async with self._send_lock:
             await write_frame(self._proc.stdin, payload)
 
-    def _call_frame(self, kind: str, cid: str, request: RemoteRequest) -> dict[str, Any]:
+    def _call_frame(self, cid: str, request: RemoteRequest) -> dict[str, Any]:
         return {
             "type": F.CALL,
-            "kind": kind,
             "call_id": cid,
-            "callable_payload": request.callable_payload,
-            "display_name": request.display_name,
-            "shape": request.shape,
-            "args": request.args,
-            "kwargs": request.kwargs,
+            "callable": str(request.callable),
+            "arguments": request.arguments,
         }
 
     def _schedule_cancel(self, cid: str) -> None:
@@ -261,68 +224,16 @@ class _SubprocessWorker:
         except Exception:
             logger.debug("cancel send failed for call %r", cid)
 
-    async def call_unary(self, request: RemoteRequest) -> RemoteResponse:
+    async def call(self, request: RemoteRequest) -> RemoteResponse:
         cid = request.call_id or _new_id()
         fut: asyncio.Future = asyncio.get_running_loop().create_future()
-        self._unary[cid] = fut
+        self._pending[cid] = fut
         try:
-            await self._send(self._call_frame(F.KIND_UNARY, cid, request))
+            await self._send(self._call_frame(cid, request))
             return await fut
         finally:
-            self._unary.pop(cid, None)
+            self._pending.pop(cid, None)
             if not fut.done():
-                self._schedule_cancel(cid)
-
-    async def iter_stream(self, request: RemoteRequest) -> AsyncIterator[dict[str, Any]]:
-        cid = request.call_id or _new_id()
-        q: asyncio.Queue = asyncio.Queue()
-        self._streams[cid] = q
-        terminated = False
-        try:
-            await self._send(self._call_frame(F.KIND_STREAM, cid, request))
-            while True:
-                ev = await q.get()
-                yield ev
-                if ev.get("type") in ("end", "error"):
-                    terminated = True
-                    return
-        finally:
-            self._streams.pop(cid, None)
-            if not terminated:
-                self._schedule_cancel(cid)
-
-    async def iter_bidi(
-        self, request: RemoteRequest, input_iter: AsyncIterator[Any],
-    ) -> AsyncIterator[dict[str, Any]]:
-        cid = request.call_id or _new_id()
-        q: asyncio.Queue = asyncio.Queue()
-        self._streams[cid] = q
-        input_task: asyncio.Task | None = None
-        terminated = False
-        try:
-            await self._send(self._call_frame(F.KIND_BIDI, cid, request))
-
-            async def _pump_input() -> None:
-                try:
-                    async for item in input_iter:
-                        await self._send({"type": F.BIDI_IN, "call_id": cid, "item": item})
-                finally:
-                    await self._send({"type": F.BIDI_END_IN, "call_id": cid})
-
-            input_task = asyncio.create_task(_pump_input())
-            while True:
-                ev = await q.get()
-                yield ev
-                if ev.get("type") in ("end", "error"):
-                    terminated = True
-                    return
-        finally:
-            self._streams.pop(cid, None)
-            if input_task is not None:
-                input_task.cancel()
-                with contextlib.suppress(BaseException):
-                    await input_task
-            if not terminated:
                 self._schedule_cancel(cid)
 
     async def shutdown(self) -> None:
@@ -348,12 +259,11 @@ class _SubprocessWorker:
 
 
 def _new_id() -> str:
-    import uuid
     return uuid.uuid4().hex
 
 
 class RuntimeWorkerClient:
-    """Owns one worker process and routes all runtime calls through it."""
+    """Owns one worker process and routes all calls through it."""
 
     def __init__(self) -> None:
         self._python: str = sys.executable
@@ -361,6 +271,12 @@ class RuntimeWorkerClient:
         self._worker: WorkerBackend | None = None
         self._spawn_lock = asyncio.Lock()
         self._inprocess = _InProcessWorker()
+        # Set by the SIO layer; invoked for each F.TRACE frame the
+        # subprocess emits. Server has no trace state.
+        self._trace_handler: TraceFrameHandler | None = None
+
+    def set_trace_handler(self, handler: TraceFrameHandler | None) -> None:
+        self._trace_handler = handler
 
     def _use_inprocess(self) -> None:
         self._worker = self._inprocess
@@ -374,6 +290,7 @@ class RuntimeWorkerClient:
             worker = _SubprocessWorker(
                 self._python,
                 runtime_bin_dir=self._runtime_bin_dir,
+                trace_handler=self._trace_handler,
             )
             await worker.start()
             self._worker = worker
@@ -383,21 +300,9 @@ class RuntimeWorkerClient:
         if self._worker is not None:
             await self._worker.shutdown()
 
-    async def call_unary(self, request: RemoteRequest) -> RemoteResponse:
+    async def call(self, request: RemoteRequest) -> RemoteResponse:
         worker = await self._get_worker()
-        return await worker.call_unary(request)
-
-    async def call_stream(self, request: RemoteRequest) -> AsyncIterator[dict[str, Any]]:
-        worker = await self._get_worker()
-        async for ev in worker.iter_stream(request):
-            yield ev
-
-    async def call_bidi(
-        self, request: RemoteRequest, input_iter: AsyncIterator[Any],
-    ) -> AsyncIterator[dict[str, Any]]:
-        worker = await self._get_worker()
-        async for ev in worker.iter_bidi(request, input_iter):
-            yield ev
+        return await worker.call(request)
 
 
 __all__ = ["RuntimeWorkerClient", "WorkerBackend"]

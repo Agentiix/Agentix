@@ -17,14 +17,15 @@ async def test_remote_call_to_importable_module():
     from tests._user_app_target import add, greet
 
     try:
-        resp = await mp.call_unary(request_for(greet, kwargs={"name": "world"}))
+        import pickle
+        resp = await mp.call(request_for(greet, kwargs={"name": "world"}))
         assert resp.ok, resp.error
-        assert resp.value == "hello world"
+        assert pickle.loads(resp.value) == "hello world"
 
         # Second function on the same module should reuse the same worker.
-        resp2 = await mp.call_unary(request_for(add, kwargs={"a": 3, "b": 4}))
+        resp2 = await mp.call(request_for(add, kwargs={"a": 3, "b": 4}))
         assert resp2.ok, resp2.error
-        assert resp2.value == 7
+        assert pickle.loads(resp2.value) == 7
 
     finally:
         await mp.shutdown()

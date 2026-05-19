@@ -1,121 +1,43 @@
 """Async client for the agentix runtime server.
 
-`RuntimeClient.remote(fn, *args, **kwargs)` is the entire surface. `fn`
-is any Python callable that stdlib pickle can serialize. Module-level
-functions/classes and pickleable callable objects are the supported
-boundary; lambdas and local closures are intentionally out of scope. The
-result is decoded into `fn`'s return type.
-The framework's three call shapes (unary / stream / bidi) are detected
-from `fn`'s signature.
+The entire user surface:
 
-Transports underneath:
-  - HTTP only for `/health`.
-  - Socket.IO for unary, server-streaming, and bidirectional calls.
+    async with RuntimeClient(url) as c:
+        result = await c.remote(fn, *args, **kwargs)
 
-The Socket.IO connection is lazy and shared across all remote calls on
-the same client. `call_id` routes each event to the right
-in-flight call.
+`fn` is any importable Python callable. The wire identifier is
+`fn.__module__::fn.__qualname__`; args/kwargs travel as a single
+pickle blob. Module-level functions, methods on importable classes,
+and pickleable callable objects all work. Lambdas and local closures
+do not — they can't round-trip through a name.
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
-import contextvars
-import inspect
+import pickle
 import uuid
-from collections.abc import AsyncGenerator, Callable, Coroutine, Iterator, Mapping
-from contextlib import contextmanager
-from typing import (
-    Any,
-    NoReturn,
-    ParamSpec,
-    TypeVar,
-    get_args,
-    overload,
-)
+from typing import Any
 
 import httpx
 import socketio
-from pydantic import TypeAdapter
 
-from agentix.runtime.shared.callables import display_name_for, dump_callable
+from agentix.runtime.shared.callables import RemoteCallable, display_name_for
 from agentix.runtime.shared.codec import pack, unpack
 from agentix.runtime.shared.events import (
-    BIDI_END,
-    BIDI_END_IN,
-    BIDI_ERROR,
-    BIDI_IN,
-    BIDI_OUT,
-    BIDI_START,
+    CALL,
+    CALL_ERROR,
+    CALL_RESULT,
     CANCEL,
-    STREAM,
-    STREAM_END,
-    STREAM_ERROR,
-    STREAM_ITEM,
-    UNARY,
-    UNARY_ERROR,
-    UNARY_RESULT,
+    TRACE_EVENT,
 )
-from agentix.runtime.shared.models import (
-    HealthResponse,
-    RemoteError,
-)
-from agentix.runtime.shared.rpc import (
-    Bidi,
-    Channel,
-    Stream,
-    Unary,
-    detect_declared_shape,
-    is_channel_annotation,
-)
-
-P = ParamSpec("P")
-R = TypeVar("R")
-T = TypeVar("T")
-
-_CLIENT_CALL_ID: contextvars.ContextVar[str | None] = contextvars.ContextVar(
-    "agentix_client_call_id",
-    default=None,
-)
-
-
-# ── Per-call hot-path helpers ────────────────────────────────────────
-#
-# `c.remote(fn, ...)` runs on every remote call. TypeAdapter compilation
-# is deterministic in annotation identity, so we cache adapters process-
-# wide. Signature lookup is intentionally uncached because arbitrary
-# callable instances may be unhashable or short-lived.
-
-def _signature_of(fn: Callable) -> inspect.Signature:
-    return inspect.signature(fn, eval_str=True)
-
-
-_ADAPTER_CACHE: dict[int, TypeAdapter] = {}
-
-
-def _adapter_for(ann: Any) -> TypeAdapter:
-    """Return a cached `TypeAdapter` for the annotation. Keyed by
-    `id(ann)`: identity-stable for annotations stored on a callable's
-    `__annotations__`, which live as long as the callable does."""
-    key = id(ann)
-    a = _ADAPTER_CACHE.get(key)
-    if a is None:
-        a = _ADAPTER_CACHE[key] = TypeAdapter(ann)
-    return a
-
-
-def _request_base(fn: Callable[..., Any], shape: str) -> dict[str, Any]:
-    return {
-        "callable_payload": dump_callable(fn),
-        "display_name": display_name_for(fn),
-        "shape": shape,
-    }
+from agentix.runtime.shared.models import HealthResponse, RemoteError
+from agentix.trace._host_bridge import dispatch_frame as _dispatch_trace_frame
 
 
 class RemoteCallError(RuntimeError):
-    """Raised when a remote callable returns a non-ok RemoteResponse, or
-    when a stream/bidi call surfaces an `error` event from the wire."""
+    """Raised when a remote callable returns a non-ok RemoteResponse."""
 
     def __init__(self, display_name: str, error: RemoteError):
         super().__init__(f"{display_name}: {error.type}: {error.message}")
@@ -123,10 +45,20 @@ class RemoteCallError(RuntimeError):
         self.error = error
 
 
-def _raise_remote_error(display_name: str, error: RemoteError) -> NoReturn:
+def _raise_remote_error(display_name: str, error: RemoteError):
     if error.cancelled:
         raise asyncio.CancelledError(error.message)
     raise RemoteCallError(display_name=display_name, error=error)
+
+
+def _decode_payload(raw: Any) -> dict[str, Any]:
+    if isinstance(raw, memoryview):
+        raw = raw.tobytes()
+    elif isinstance(raw, bytearray):
+        raw = bytes(raw)
+    if isinstance(raw, bytes):
+        return unpack(raw)
+    return raw
 
 
 class RuntimeClient:
@@ -135,10 +67,10 @@ class RuntimeClient:
     def __init__(self, base_url: str, timeout: float = 300):
         self._base_url = base_url
         self._client = httpx.AsyncClient(base_url=base_url, timeout=timeout)
-        # Socket.IO bookkeeping — created lazily on first stream/bidi/log call.
+        # Socket.IO bookkeeping — created lazily on first remote call.
         self._sio: socketio.AsyncClient | None = None
         self._sio_lock = asyncio.Lock()
-        # call_id -> event queue. Stream and bidi share the same machinery.
+        # call_id → queue of (kind, data) for in-flight calls.
         self._pending: dict[str, asyncio.Queue] = {}
 
     # ── lifecycle ────────────────────────────────────────────────
@@ -150,234 +82,53 @@ class RuntimeClient:
         await self._client.aclose()
 
     async def __aenter__(self):
+        await self._ensure_sio()
         return self
 
     async def __aexit__(self, *args):
         await self.close()
 
-    @contextmanager
-    def call_context(self, *, call_id: str | None = None) -> Iterator[None]:
-        """Temporarily attach a `call_id` to remote calls. Forwarded to
-        `RemoteRequest.call_id` for correlation; stored in a contextvar
-        so concurrent asyncio tasks can each carry their own."""
-        token = _CLIENT_CALL_ID.set(call_id)
-        try:
-            yield
-        finally:
-            _CLIENT_CALL_ID.reset(token)
-
-    # ── runtime server endpoints ─────────────────────────────────
+    # ── public API ───────────────────────────────────────────────
 
     async def health(self) -> HealthResponse:
         r = await self._client.get("/health")
         r.raise_for_status()
         return HealthResponse.model_validate(r.json())
 
-    # ── typed remote call ────────────────────────────────────────
+    async def remote(self, fn, *args, **kwargs):
+        """Execute `fn(*args, **kwargs)` in the sandbox and return its result.
 
-    @overload
-    def remote(
-        self,
-        fn: Callable[P, AsyncGenerator[T, Any]],
-        /,
-        *args: P.args,
-        **kwargs: P.kwargs,
-    ) -> Stream[T] | Bidi[Any, T]: ...
-
-    @overload
-    def remote(
-        self,
-        fn: Callable[P, Coroutine[Any, Any, R]],
-        /,
-        *args: P.args,
-        **kwargs: P.kwargs,
-    ) -> Unary[R]: ...
-
-    def remote(self, fn, *args, **kwargs):
-        """Execute `fn` in the sandbox and return its typed result.
-
-        Returns a tagged variant whose Python protocol matches the call
-        shape — `await` a `Unary`, `async for` over a `Stream` or `Bidi`.
-        Generic helpers can `match` on the variant for exhaustive handling.
-
-          * `async def f(...) -> T`                          → `Unary[T]`
-          * `async def f(...) -> AsyncIterator[T]: yield ...` → `Stream[T]`
-          * `async def f(..., inbox: Channel[I]) -> AsyncIterator[T]: yield ...`
-            → `Bidi[I, T]`; caller pushes inputs via `inbox.send(...)`
+        `fn` must be importable on the worker side — `c.remote` doesn't
+        send the function's code, only its `module::qualname` identifier.
+        The worker resolves it via `import_module + getattr`.
         """
-        sig = _signature_of(fn)
-        shape = detect_declared_shape(fn, sig)
-        if shape == "unary":
-            return Unary(self._remote_unary(fn, sig, args, kwargs))
-        if shape == "stream":
-            return Stream(self._remote_stream(fn, sig, args, kwargs))
-        bound = sig.bind(*args, **kwargs)
-        bound.apply_defaults()
-        chan_name, inbox, item_type = self._extract_channel(fn, sig, bound.arguments)
-        return Bidi(inbox, self._remote_bidi(fn, sig, chan_name, item_type, inbox, bound.arguments))
-
-    @staticmethod
-    def _extract_channel(
-        fn, sig: inspect.Signature, arguments: Mapping[str, Any],
-    ) -> tuple[str, Channel, Any]:
-        """Locate the `Channel[T]` parameter, pull the user-passed Channel
-        instance from bound arguments, and recover `T` for item validation.
-
-        Returns `(param_name, channel, item_type)`. Raises if the bidi
-        callable has no Channel-typed param, or the user didn't pass a
-        Channel instance for it."""
         display_name = display_name_for(fn)
-        for pname, param in sig.parameters.items():
-            if not is_channel_annotation(param.annotation):
-                continue
-            ch = arguments.get(pname)
-            if not isinstance(ch, Channel):
-                raise TypeError(
-                    f"{display_name}: bidi parameter "
-                    f"'{pname}' must be an agentix.Channel instance "
-                    f"(got {type(ch).__name__})"
-                )
-            type_args = get_args(param.annotation)
-            return pname, ch, (type_args[0] if type_args else Any)
-        raise TypeError(
-            f"{display_name}: bidi callable has no "
-            f"Channel[T] parameter"
-        )
-
-    async def _remote_unary(self, fn, sig, args, kwargs):
-        display_name = display_name_for(fn)
+        callable_ref = RemoteCallable._resolve(fn)
+        arguments = pickle.dumps((args, kwargs))
         sio = await self._ensure_sio()
-        outer_call_id = _CLIENT_CALL_ID.get()
-        call_id = outer_call_id or uuid.uuid4().hex
+        call_id = uuid.uuid4().hex
         q: asyncio.Queue = asyncio.Queue()
         self._pending[call_id] = q
 
         payload = {
-            **_request_base(fn, "unary"),
             "call_id": call_id,
-            "args": _encode_args(sig, args),
-            "kwargs": _encode_kwargs(sig, kwargs),
+            "callable": str(callable_ref),
+            "arguments": arguments,
         }
         terminated = False
         try:
-            await sio.emit(UNARY, pack(payload))
+            await sio.emit(CALL, pack(payload))
             while True:
                 kind, data = await q.get()
                 if kind == "result":
                     terminated = True
-                    value = data.get("value")
-                    return_ann = sig.return_annotation
-                    if return_ann is inspect.Signature.empty:
-                        return value
-                    return _adapter_for(return_ann).validate_python(value)
+                    raw = data.get("value")
+                    return pickle.loads(raw) if raw is not None else None
                 if kind == "error":
                     err = RemoteError.model_validate(data["error"])
                     terminated = True
                     _raise_remote_error(display_name, err)
         finally:
-            self._pending.pop(call_id, None)
-            if not terminated:
-                with contextlib.suppress(BaseException):
-                    await sio.emit(CANCEL, pack({"call_id": call_id}))
-
-    async def _remote_stream(self, fn, sig, args, kwargs):
-        display_name = display_name_for(fn)
-        sio = await self._ensure_sio()
-        outer_call_id = _CLIENT_CALL_ID.get()
-        call_id = outer_call_id or uuid.uuid4().hex
-        q: asyncio.Queue = asyncio.Queue()
-        self._pending[call_id] = q
-
-        ret_args = get_args(sig.return_annotation)
-        item_adapter = _adapter_for(ret_args[0] if ret_args else Any)
-        terminated = False
-        try:
-            payload = {
-                **_request_base(fn, "stream"),
-                "call_id": call_id,
-                "args": _encode_args(sig, args),
-                "kwargs": _encode_kwargs(sig, kwargs),
-            }
-            await sio.emit(STREAM, pack(payload))
-            while True:
-                kind, data = await q.get()
-                if kind == "end":
-                    terminated = True
-                    return
-                if kind == "error":
-                    err = RemoteError.model_validate(data["error"])
-                    terminated = True
-                    _raise_remote_error(display_name, err)
-                if kind == "item":
-                    yield item_adapter.validate_python(data["value"])
-        finally:
-            self._pending.pop(call_id, None)
-            if not terminated:
-                with contextlib.suppress(BaseException):
-                    await sio.emit(CANCEL, pack({"call_id": call_id}))
-
-    async def _remote_bidi(
-        self, fn, sig, chan_name: str, in_item_type: Any,
-        inbox: Channel, bound_arguments: Mapping[str, Any],
-    ):
-        """Bidi over Socket.IO: client emits `bidi:start`, streams inputs as
-        `bidi:in`, signals end-of-input with `bidi:end_in`. Server replies via
-        `bidi:out` / `bidi:end` / `bidi:error` correlated by `call_id`.
-
-        `chan_name`, `inbox`, and `in_item_type` are already discovered
-        by `_extract_channel` in `remote()`; this method does not
-        re-scan the signature.
-        """
-        display_name = display_name_for(fn)
-
-        non_channel_kwargs = dict(bound_arguments)
-        non_channel_kwargs.pop(chan_name, None)
-        non_channel_kwargs = _encode_kwargs(sig, non_channel_kwargs)
-        out_args = get_args(sig.return_annotation)
-        out_adapter = _adapter_for(out_args[0] if out_args else Any)
-        in_adapter = _adapter_for(in_item_type)
-
-        sio = await self._ensure_sio()
-        outer_call_id = _CLIENT_CALL_ID.get()
-        call_id = outer_call_id or uuid.uuid4().hex
-        q: asyncio.Queue = asyncio.Queue()
-        self._pending[call_id] = q
-
-        payload = {
-            **_request_base(fn, "bidi"),
-            "call_id": call_id,
-            "args": [], "kwargs": non_channel_kwargs,
-        }
-        await sio.emit(BIDI_START, pack(payload))
-
-        async def _sender() -> None:
-            try:
-                async for item in inbox:
-                    encoded = in_adapter.dump_python(item, mode="python")
-                    await sio.emit(BIDI_IN, pack({"call_id": call_id, "item": encoded}))
-                await sio.emit(BIDI_END_IN, pack({"call_id": call_id}))
-            except Exception:
-                # outer loop will see an error event or close
-                pass
-
-        sender = asyncio.create_task(_sender())
-        terminated = False
-        try:
-            while True:
-                kind, data = await q.get()
-                if kind == "end":
-                    terminated = True
-                    return
-                if kind == "error":
-                    err = RemoteError.model_validate(data["error"])
-                    terminated = True
-                    _raise_remote_error(display_name, err)
-                if kind == "item":
-                    yield out_adapter.validate_python(data["value"])
-        finally:
-            sender.cancel()
-            with contextlib.suppress(BaseException):
-                await sender
             self._pending.pop(call_id, None)
             if not terminated:
                 with contextlib.suppress(BaseException):
@@ -393,23 +144,20 @@ class RuntimeClient:
                 return self._sio
             sio = socketio.AsyncClient()
 
-            async def _on_stream_item(data): await self._route_event("item", data)
-            async def _on_stream_end(data):  await self._route_event("end", data)
-            async def _on_stream_error(data): await self._route_event("error", data)
-            async def _on_bidi_out(data):   await self._route_event("item", data)
-            async def _on_bidi_end(data):   await self._route_event("end", data)
-            async def _on_bidi_error(data): await self._route_event("error", data)
-            async def _on_unary_result(data): await self._route_event("result", data)
-            async def _on_unary_error(data): await self._route_event("error", data)
+            async def _on_call_result(data):
+                await self._route_event("result", data)
 
-            sio.on(UNARY_RESULT, _on_unary_result)
-            sio.on(UNARY_ERROR, _on_unary_error)
-            sio.on(STREAM_ITEM, _on_stream_item)
-            sio.on(STREAM_END, _on_stream_end)
-            sio.on(STREAM_ERROR, _on_stream_error)
-            sio.on(BIDI_OUT, _on_bidi_out)
-            sio.on(BIDI_END, _on_bidi_end)
-            sio.on(BIDI_ERROR, _on_bidi_error)
+            async def _on_call_error(data):
+                await self._route_event("error", data)
+
+            sio.on(CALL_RESULT, _on_call_result)
+            sio.on(CALL_ERROR, _on_call_error)
+
+            async def _on_trace_event(data):
+                # Pure passthrough — decode + dispatch to host's
+                # `agentix.trace` processors. No state here.
+                _dispatch_trace_frame(_decode_payload(data))
+            sio.on(TRACE_EVENT, _on_trace_event)
 
             await sio.connect(self._base_url)
             self._sio = sio
@@ -423,49 +171,4 @@ class RuntimeClient:
             await q.put((kind, data))
 
 
-def _encode_args(sig: inspect.Signature, args: tuple) -> list[Any]:
-    """Encode positional args via each parameter's TypeAdapter so dataclasses,
-    BaseModels, ndarrays, and other native Python types pass through msgpack
-    cleanly (mode="python" — msgpack ext types handle ndarray + BaseModel
-    natively; no JSON intermediate).
-    """
-    out: list[Any] = []
-    params = list(sig.parameters.values())
-    for i, v in enumerate(args):
-        ann = (
-            params[i].annotation
-            if i < len(params) and params[i].annotation is not inspect.Parameter.empty
-            else Any
-        )
-        try:
-            out.append(_adapter_for(ann).dump_python(v, mode="python"))
-        except Exception:
-            out.append(v)
-    return out
-
-
-def _encode_kwargs(sig: inspect.Signature, kwargs: dict[str, Any]) -> dict[str, Any]:
-    """Like `_encode_args` but for keyword args, looked up by parameter name."""
-    out: dict[str, Any] = {}
-    for k, v in kwargs.items():
-        param = sig.parameters.get(k)
-        ann = (
-            param.annotation
-            if param is not None and param.annotation is not inspect.Parameter.empty
-            else Any
-        )
-        try:
-            out[k] = _adapter_for(ann).dump_python(v, mode="python")
-        except Exception:
-            out[k] = v
-    return out
-
-
-def _decode_payload(raw: Any) -> dict[str, Any]:
-    if isinstance(raw, memoryview):
-        raw = raw.tobytes()
-    elif isinstance(raw, bytearray):
-        raw = bytes(raw)
-    if isinstance(raw, bytes):
-        return unpack(raw)
-    return raw
+__all__ = ["RemoteCallError", "RuntimeClient"]

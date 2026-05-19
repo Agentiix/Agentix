@@ -27,11 +27,17 @@ Agentix has two primitives:
   declared dependencies into a deploy-ready runtime image.
 
 ```python
-from agentix import RuntimeClient
-from app import run
+from agentix import RuntimeClient, SandboxConfig, session
+from agentix.bash import run
+from agentix.deployment.docker import DockerDeployment
 
-async with RuntimeClient(sandbox.runtime_url) as client:
-    result = await client.remote(run, input="hello")
+config = SandboxConfig(
+    image="python:3.13-slim",
+    runtime_image="hello-agentix:0.1.0",
+)
+async with session(DockerDeployment(), config) as sandbox:
+    async with RuntimeClient(sandbox.runtime_url) as client:
+        result = await client.remote(run, command="echo hello from $(uname -a)")
 ```
 
 The unit of composition is not a bespoke benchmark runner or agent
@@ -53,15 +59,18 @@ call it.
 | Claude Code, Codex, Aider, OpenHands, or an internal agent | `async def run(...) -> RunResult` | `await client.remote(run, ...)` |
 | Shell, files, repo setup, or local tools | `async def run(command: str) -> BashResult` | `await client.remote(bash_run, ...)` |
 | SWE-bench, MLE-Bench, or an internal evaluator | `async def score(...) -> Score` | `await client.remote(score, ...)` |
-| Streaming or interactive workflows | `async def stream(...) -> AsyncIterator[Event]` | `async for event in client.remote(stream, ...)` |
 
 ## What Ships
 
-- **Typed remote calls** across the host-to-sandbox boundary.
-- **Unary, streaming, and bidirectional call shapes** inferred from
-  callable signatures.
+- **Unary remote calls** (`await client.remote(fn, *args, **kwargs)`)
+  across the host-to-sandbox boundary. One shape. Pickled callable +
+  pickled args/kwargs go in; the pickled return value comes back.
 - **One runtime worker process today** behind an internal worker backend
   boundary, so future pools or per-call isolation can stay API-compatible.
+- **Tracing** as an orthogonal layer: `agentix.trace.span(...)` inside
+  the sandbox produces Trace/Span/SpanEvent lifecycle events that
+  cross to the host via a side-channel and dispatch to any
+  `agentix.trace.Processor` the host has registered.
 - **Bundle builds** from normal Python projects and `pyproject.toml`
   dependencies.
 - **Optional Nix system dependencies** when a project includes
@@ -71,74 +80,70 @@ call it.
 
 ## Quickstart
 
-Install the host framework and a deployment backend:
+Run the smallest demo from
+[`agentix-cookbook/examples/hello-agentix`](https://github.com/Agentiix/agentix-cookbook/tree/main/examples/hello-agentix):
 
 ```bash
-pip install agentixx agentix-deployment-docker
+cd examples/hello-agentix
+uv sync
+uv run agentix build . --name hello-agentix  # builds hello-agentix:0.1.0
+uv run python run.py
 ```
 
-Create a remote callable:
-
-```python
-# src/hello_agentix/__init__.py
-async def run(input: str) -> str:
-    return f"sandbox saw: {input}"
-```
-
-Build a bundle:
-
-```bash
-agentix build ./hello-agentix -o hello-agentix:0.1.0
-```
-
-Deploy it and call the callable:
+The demo builds `hello-agentix:0.1.0`, overlays it onto
+`python:3.13-slim`, then calls `agentix.bash.run` inside the sandbox:
 
 ```python
 import asyncio
 
-from agentix import RuntimeClient
-from agentix.deployment.base import SandboxConfig, session
+from agentix import RuntimeClient, SandboxConfig, session
+from agentix.bash import run
 from agentix.deployment.docker import DockerDeployment
-from hello_agentix import run
 
 
 async def main() -> None:
     deployment = DockerDeployment()
-    config = SandboxConfig(image="hello-agentix:0.1.0")
-
+    config = SandboxConfig(
+        image="python:3.13-slim",
+        runtime_image="hello-agentix:0.1.0",
+    )
     async with session(deployment, config) as sandbox:
+        print(f"sandbox up at {sandbox.runtime_url}")
         async with RuntimeClient(sandbox.runtime_url) as client:
-            print(await client.remote(run, input="hello"))
+            result = await client.remote(run, command="echo hello from $(uname -a)")
+            print(f"exit={result.exit_code} stdout={result.stdout!r}")
 
 
 asyncio.run(main())
 ```
 
 Read the full [quickstart](https://agentiix.github.io/quickstart) for the
-package layout and runtime-image prerequisites.
+project layout, lockfile, and runtime-image details.
 
 ## Architecture
 
 ```text
 Host process
-  RuntimeClient.remote(fn, ...)
-    serializes callable with pickle
-    detects unary / stream / bidi
-    encodes args and kwargs
+  RuntimeClient.remote(fn, *args, **kwargs)
+    builds RemoteCallable from pickle.dumps(fn)
+    pickles (args, kwargs) as one blob
         |
-        v
+        v  Socket.IO "unary"
 Sandbox
   agentix-server
-        |
+        |  msgpack frame
         v
   worker subprocess
-    unpickles callable
-    validates args
+    RemoteCallable.resolve() -> fn
+    pickle.loads(arguments) -> args, kwargs
     calls fn(*args, **kwargs)
+    pickles the result back
 ```
 
-Remote calls use Socket.IO events for unary, streaming, and bidirectional
-shapes. HTTP is kept only for `/health`. Errors stay in-band.
+The wire carries a single shape: unary. Cancellation has its own
+event (`cancel`). Trace lifecycle events cross as a separate
+broadcast channel (`trace:event`). HTTP is kept only for `/health`.
+Errors stay in-band.
 
 ## Repository Map
 

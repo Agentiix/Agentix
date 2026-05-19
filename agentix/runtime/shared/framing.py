@@ -12,26 +12,22 @@ handles encode/decode, including ext types for ndarray + pydantic models.
 Frame schemas (`{"type": "...", ...}` — extra fields per type):
 
   ─── runtime → worker ─────────────────────────────────────
-    call         {call_id, kind, callable_payload, display_name, shape, args, kwargs}
-    bidi_in      {call_id, item}            — push input chunk to a bidi call
-    bidi_end_in  {call_id}                   — close input side of a bidi call
-    cancel       {call_id}                   — abort an in-flight call
-    shutdown     {}                          — graceful exit; worker drains then exits
+    call         {call_id, callable, arguments}   — start a call
+    cancel       {call_id}                        — abort an in-flight call
+    shutdown     {}                               — graceful exit; worker drains then exits
 
   ─── worker → runtime ─────────────────────────────────────
-    ready        {}                          — sent once after worker startup
-    boot_error   {error}                     — sent once if startup fails
-    result       {call_id, value}            — unary success
-    error        {call_id, error}            — unary failure or stream/bidi error
-    stream_item  {call_id, value}            — one chunk of a streaming response
-    stream_end   {call_id}                   — clean end of stream/bidi out
+    ready        {}                               — sent once after worker startup
+    boot_error   {error}                          — sent once if startup fails
+    result       {call_id, value}                 — call succeeded (value is pickle bytes)
+    error        {call_id, error}                 — call failed
+    trace        {frame}                          — opaque side-channel payload (forwarded as-is)
 
 `call_id` correlates request frames with their response frames.
 
-Callable payloads are stdlib pickle bytes. Args/kwargs/values are native
-Python objects (msgpack round-trips them via codec's ext types). Pydantic
-validation happens on the receiving end via `TypeAdapter.validate_python`
-— there's no JSON intermediate.
+`callable` is a base64-encoded pickle of the function (a
+`RemoteCallable` string); `arguments` is pickle.dumps((args, kwargs));
+the worker pickles the return value back into `value`.
 """
 
 from __future__ import annotations
