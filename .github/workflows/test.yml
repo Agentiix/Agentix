@@ -32,17 +32,39 @@ jobs:
         run: uv run pytest tests/ -v
 
   e2e:
-    name: build e2e
-    runs-on: ubuntu-latest
+    name: build e2e (${{ matrix.source_platform }} to ${{ matrix.target_platform }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            source_platform: linux/amd64
+            target_platform: linux/amd64
+          - runner: ubuntu-24.04
+            source_platform: linux/amd64
+            target_platform: linux/arm64
+          - runner: ubuntu-24.04-arm
+            source_platform: linux/arm64
+            target_platform: linux/amd64
+          - runner: ubuntu-24.04-arm
+            source_platform: linux/arm64
+            target_platform: linux/arm64
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: amd64,arm64
+      - uses: docker/setup-buildx-action@v3
       - name: sync workspace
-        run: uv sync --all-packages
+        run: uv sync --all-packages --all-extras
       # `agentix build` drives `docker buildx`; Nix runs inside the
-      # build container, so the runner needs only Docker (preinstalled
-      # on ubuntu-latest). `-m e2e` overrides the default exclusion.
+      # build container, so the runner needs only Docker. `-m e2e`
+      # overrides the default exclusion.
       - name: build a real bundle
-        run: uv run pytest tests/test_build_e2e.py -v -m e2e
+        run: uv run pytest tests/test_build_e2e.py::test_platform_bundle_builds_and_runs -v -m e2e
+        env:
+          AGENTIX_E2E_PLATFORM: ${{ matrix.target_platform }}
