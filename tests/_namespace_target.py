@@ -27,6 +27,15 @@ async def echo_via_namespace(payload: dict) -> dict:
     return await svc.request("echo", payload, timeout=10.0)
 
 
+async def fire_namespace_event(payload: dict) -> str:
+    """Emit `slow` on `/plugin-test` and return immediately — does NOT
+    wait for the host handler. Used to prove a slow host handler does
+    not stall the runtime's other traffic."""
+    svc = _get()
+    await svc.emit("slow", payload)
+    return "fired"
+
+
 async def emit_log_line(message: str, level: str = "INFO") -> None:
     """Log via stdlib logging; the worker's log bridge ships it to host."""
     import logging

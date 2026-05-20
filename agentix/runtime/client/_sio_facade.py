@@ -8,11 +8,15 @@ the bytes/msgpack wire format stays internal.
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from typing import Any
 
 import socketio
 
 from agentix.runtime.shared.codec import pack, unpack
+
+logger = logging.getLogger("agentix.runtime.client.sio")
 
 
 def _decode(raw: Any) -> Any:
@@ -25,23 +29,59 @@ def _decode(raw: Any) -> Any:
     return raw
 
 
+# Socket.IO lifecycle events run inline (they're cheap and ordering
+# matters); everything else is a user data event and is detached.
+_LIFECYCLE_EVENTS = frozenset({"connect", "disconnect", "connect_error"})
+
+
 class AsyncClientNamespace(socketio.AsyncClientNamespace):
     """`socketio.AsyncClientNamespace` with msgpack at the boundary.
 
     Override `on_<event>` for inbound; call `await self.emit(...)` for
     outbound. Data is plain Python — packing happens automatically.
+
+    Data-event handlers are dispatched as **detached tasks**, never
+    awaited inline. `socketio.AsyncClient` awaits `trigger_event` inside
+    its single websocket receive loop — so a slow handler (e.g. one
+    that calls a slow LLM) would stall *every* inbound event on the
+    connection, including unrelated `c.remote` results. Detaching keeps
+    the receive loop free; handler ordering per event is still
+    preserved by the order tasks are created.
     """
+
+    _detached_tasks: set[asyncio.Task]
 
     async def emit(self, event: str, data: Any = None, **kwargs: Any) -> Any:
         return await super().emit(event, pack(data), **kwargs)
 
     async def trigger_event(self, event: str, *args: Any) -> Any:
-        # Unpack the single data payload (socketio always emits one arg
-        # for a bytes event). Lifecycle events (`connect`, `disconnect`)
-        # come with no data and we let them pass through untouched.
+        if event in _LIFECYCLE_EVENTS:
+            # Lifecycle: run inline. No msgpack payload to unwrap.
+            return await super().trigger_event(event, *args)
+
+        # Data event: unwrap the msgpack payload, then dispatch detached.
         if args and isinstance(args[0], (bytes, bytearray, memoryview)):
             args = (_decode(args[0]),) + args[1:]
-        return await super().trigger_event(event, *args)
+
+        handler = getattr(self, "on_" + event, None)
+        if handler is None:
+            return None
+
+        result = handler(*args)
+        if asyncio.iscoroutine(result):
+            if not hasattr(self, "_detached_tasks"):
+                self._detached_tasks = set()
+            task = asyncio.create_task(self._guard(result, event))
+            self._detached_tasks.add(task)
+            task.add_done_callback(self._detached_tasks.discard)
+        return None
+
+    @staticmethod
+    async def _guard(coro: Any, event: str) -> None:
+        try:
+            await coro
+        except Exception:
+            logger.exception("namespace handler for %r raised", event)
 
 
 __all__ = ["AsyncClientNamespace"]

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 
 import pytest
 
@@ -15,6 +16,7 @@ from tests._namespace_target import (
     emit_log_line,
     emit_log_with_exception,
     emit_log_with_extra,
+    fire_namespace_event,
 )
 
 
@@ -47,6 +49,51 @@ async def test_plugin_namespace_round_trip(live_server):
     assert result == {"echoed": {"hello": 1}}
     assert len(host_ns.seen) == 1
     assert host_ns.seen[0]["data"] == {"hello": 1}
+
+
+class _SlowHost(AsyncClientNamespace):
+    """Host namespace whose `slow` handler blocks for a long time."""
+
+    def __init__(self, hold: float) -> None:
+        super().__init__("/plugin-test")
+        self._hold = hold
+        self.started = False
+        self.finished = False
+
+    async def on_slow(self, data):
+        self.started = True
+        await asyncio.sleep(self._hold)
+        self.finished = True
+
+
+@pytest.mark.asyncio
+async def test_slow_namespace_handler_does_not_block_runtime(live_server):
+    """A slow plugin handler must not stall the SIO receive loop —
+    otherwise unrelated `c.remote` results queue up behind it.
+
+    Regression: `socketio.AsyncClient` awaits `trigger_event` inline in
+    its single websocket receive loop. `AsyncClientNamespace` detaches
+    data-event handlers so a slow one can't freeze the connection.
+    """
+    base_url = await live_server()
+    slow_host = _SlowHost(hold=30.0)
+
+    client = RuntimeClient(base_url)
+    client.register_namespace(slow_host)
+    async with client as c:
+        # Fire the event whose host handler sleeps 30s.
+        await c.remote(fire_namespace_event, {"k": "v"})
+
+        # Immediately do a normal RPC. If the slow handler blocked the
+        # receive loop, this `call:result` would be stuck behind it for
+        # ~30s. With the fix it returns near-instantly.
+        t0 = time.perf_counter()
+        result = await asyncio.wait_for(c.remote(abs, -5), timeout=10)
+        elapsed = time.perf_counter() - t0
+
+    assert result == 5
+    assert elapsed < 8.0, f"runtime stalled behind slow handler: {elapsed:.1f}s"
+    assert slow_host.started, "slow handler never ran"
 
 
 @pytest.mark.asyncio
