@@ -23,6 +23,7 @@ What it proves end to end:
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -41,6 +42,7 @@ pytestmark = [
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _EXAMPLE = _REPO_ROOT / "examples" / "hello-bundle"
 _IMAGE = "agentix-build-e2e:pytest"
+_SELECTED_PLATFORM = "AGENTIX_E2E_PLATFORM"
 
 
 def _sh(image: str, script: str) -> str:
@@ -156,6 +158,10 @@ def test_entrypoint_wired(bundle_image: str) -> None:
     ],
 )
 def test_platform_bundle_builds_and_runs(platform: str, machine: str) -> None:
+    selected = os.environ.get(_SELECTED_PLATFORM)
+    if selected and selected != platform:
+        pytest.skip(f"{_SELECTED_PLATFORM}={selected} selects a different platform")
+
     supported = _docker_buildx_platforms()
     if not _supports_platform(supported, platform):
         pytest.skip(f"Docker buildx does not report support for {platform}: {sorted(supported)}")
