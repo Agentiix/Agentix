@@ -125,8 +125,8 @@ agentix/
 │   ├── client/        — RuntimeClient (host) + AsyncClientNamespace
 │   └── server/        — FastAPI + Socket.IO + worker subprocess
 ├── deployment/        — Deployment Protocol + backend plugin loader
-├── cli/               — `agentix build`
-└── nix/               — shipped Nix builder (flake + uv2nix wrapper)
+├── cli/               — `agentix build` + in-container `_assemble`
+└── nix/               — shipped builder (flake.nix, Dockerfile, bundle-build.sh)
 ```
 
 One line per system:
@@ -148,9 +148,10 @@ One line per system:
   invokes pickle-resolved callables, dynamic namespace forwarding for
   `/trace`, `/log`, and any plugin `/<package-name>`.
 - **deployment** — host-side `Deployment` Protocol and backend lookup.
-- **cli** — `agentix build [path]`.
-- **nix** — `flake.nix`, `builder.nix`, `wrapper.nix.tmpl` shipped as
-  wheel data; `agentix build` stages them per invocation.
+- **cli** — `agentix build [path]` (host) + `agentix.cli._assemble`
+  (in-container closure discovery).
+- **nix** — `flake.nix`, `flake.lock`, `Dockerfile`, `bundle-build.sh`
+  shipped as wheel data; `agentix build` stages them per invocation.
 
 ## Remote Call Implementation
 
@@ -213,43 +214,54 @@ a generated `request_id`.
 
 ## Bundle Implementation
 
-`agentix build [path]` produces a self-contained, distro-portable
-runtime image from one project root. No base image, no `FROM`, no `pip
-install` inside the build. Everything goes through Nix:
+`agentix build [path]` produces a runtime image from one project root.
+The build splits along one hard line — **uv owns Python, Nix owns
+system binaries; there is no uv2nix.**
 
-```toml
-[project]
-name = "my-agent"
-version = "0.1.0"
-dependencies = [
-    "agentixx>=0.2.1",
-    "agentix-runtime-basic>=0.1.2",
-    "agentix-deployment-docker>=0.1.3",
-]
-```
+The host side is thin: `agentix build` finds the project's git repo,
+copies it into a Docker build context, and runs `docker buildx build`.
+Every heavy step happens *inside* the container, so the host needs
+only `agentixx`, `docker`, and `git` — no project venv, no uv, no Nix.
+The whole repo is the context (so a uv-workspace member / cookbook
+example can resolve its path dependencies); the project is addressed
+by its subpath.
 
-The user must also have a `uv.lock` (run `uv lock`). uv2nix consumes
-that lock and produces Nix derivations for every Python dep — the
-interpreter, agentixx, plugins, the user's project, and transitive
-deps all land in `/nix/store/...` with rpath-resolved closures, so the
-resulting image runs against any Linux task image when overlaid via
-`SandboxConfig.runtime_image`.
+Inside the container (`agentix/nix/bundle-build.sh`):
 
-Two inputs to the build:
+1. **Toolchain** — `nix build .#toolchain` materializes the
+   interpreter + uv into `/nix/store`. Python version comes from the
+   project's `requires-python`.
+2. **Python deps** — `uv venv /nix/runtime/venv` + `uv sync` install
+   the full dependency closure (non-editable). This is a plain uv
+   venv; uv natively handles path / git / registry sources, so there
+   is no staging puzzle and no build-backend fragility.
+3. **System closures** — `python -m agentix.cli._assemble` discovers
+   every system-deps `{ pkgs }: drv` (see below) and stages them into
+   `closures/`.
+4. **Runtime** — `nix build .#runtime` `symlinkJoin`s the toolchain +
+   all closures; the merged tree is placed at `/nix/runtime`.
 
-1. **Python side — `pyproject.toml` + `uv.lock`.** uv2nix reads the
-   lock; `mkVirtualEnv` materializes a venv with the full closure;
-   `/bin/agentix-server` becomes the entry point.
+System-deps closures, two sources:
 
-2. **System side — plugin `default.nix` files.** Each plugin may ship
-   a `default.nix` next to its Python module. `agentix build`
-   discovers them via `importlib.resources.files('agentix.<short>') /
-   'default.nix'` and `symlinkJoin`s the results into the bundle's
-   `/bin/`. Plugins that need no system binaries can skip the file.
+- **Plugins.** A plugin registers one entry point in the `agentix.nix`
+  group; the value names a module that ships a `default.nix` as
+  package data. `_assemble` walks the group + `importlib.resources` —
+  import-free, follows the dependency graph, every file has provenance
+  (which distribution shipped it). No directory scanning.
+- **The project.** Declared as `[tool.agentix] nix = "<path>"` — the
+  only place a bundle author writes Nix. Optional.
 
-Plugin nix expressions follow one convention: `{ pkgs }: drv`. The
-builder hands every plugin the same Nixpkgs revision (pinned in
+Plugin/project Nix files follow one convention: `{ pkgs }: drv`. The
+builder hands every closure the same Nixpkgs revision (pinned in
 `agentix/nix/flake.lock`).
+
+Result image layout (`/nix` is what gets mounted):
+
+```text
+/nix/store/...               closures: interpreter, uv, system deps
+/nix/runtime/venv            the uv venv — all Python deps
+/nix/runtime/{bin,lib,...}   symlinkJoin of every closure
+```
 
 The two-image runtime: deployments overlay `SandboxConfig.runtime_image`
 (the bundle from `agentix build`) onto `SandboxConfig.image` (a

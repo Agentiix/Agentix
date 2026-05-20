@@ -1,40 +1,39 @@
-"""`agentix build` — package a Python project into a deploy-ready sandbox image.
+"""`agentix build` — package a Python project into a runtime image.
 
 Usage:
 
-    agentix build                         # current directory's pyproject
+    agentix build                         # current directory's project
     agentix build path/to/project         # explicit project root
-    agentix build . --name hello-agentix  # NAME (auto-appends :<pyproject-version>)
+    agentix build . --name hello-agentix  # NAME (auto-appends :<version>)
     agentix build . --name hello:dev      # NAME:TAG (used verbatim)
-    agentix build . --dry-run             # stage build context to ./build/<name>/, no nix invoke
+    agentix build . --dry-run             # stage the build context only
 
-The single argument is a path to a directory containing `pyproject.toml`
-+ `uv.lock`. uv2nix reads the lock to materialize every Python dep as a
-Nix derivation; the resulting image carries `/nix/store/...-python-env`
-with the full closure (interpreter, agentixx, plugins, user code, all
-transitive deps) and a `/bin/agentix-server` entry point.
+The argument is a project root — a directory with `pyproject.toml` +
+`uv.lock`. The build splits cleanly along one line:
 
-Plugins contribute *system* binaries through `default.nix` files shipped
-alongside their Python module. We discover them with
-`importlib.resources` scanning `agentix.<short>` packages — any
-`default.nix` found is composed into the bundle's PATH. The user's own
-project may also drop a `default.nix` at its root to declare extra
-system deps (git, ffmpeg, ...).
+  * **Python deps** are uv's job. Inside the build container `uv venv`
+    + `uv sync` materialize the project's full dependency closure into
+    `/nix/runtime/venv` — exactly the venv uv would produce anywhere.
+  * **System deps** are Nix's job. The interpreter + uv come from a
+    Nix toolchain closure; plugins and the project contribute
+    `{ pkgs }: drv` files that Nix builds and `symlinkJoin`s into
+    `/nix/runtime`. Nix never touches Python packaging — no uv2nix.
 
-Build shape:
+The host side is deliberately thin: find the project's git repo, copy
+it into a build context, and hand the context to `docker buildx build`.
+Every heavy step — `uv venv`, `uv sync`, `nix build` — happens inside
+the container. The host needs only `agentixx`, `docker`, and `git`;
+no project venv, no uv, no nix.
 
-  * **One Nix evaluation per build.** uv2nix takes the workspace's
-    `pyproject.toml` + `uv.lock`, produces an overlay over the chosen
-    Python set, and `mkVirtualEnv` materializes the venv. Plugin
-    default.nix files are imported with the same `pkgs` and joined via
-    `symlinkJoin` so all paths land at `/bin/*` and `/nix/store/*`.
+A project that path-depends on siblings (a uv workspace, a cookbook
+example) needs those siblings in the build context — so the context is
+the whole git repository, with the project addressed by its subpath.
 
-  * **streamLayeredImage output.** The `nix-build` result is an
-    executable script. `<result> | docker load` produces an image tagged
-    `<name>:<tag>` locally.
+Result image layout (mounted into a task container at `/nix`):
 
-No base image, no `FROM`, no `pip install` inside the build. The bundle
-is a Nix closure first, then a docker tarball.
+    /nix/store/...        the closures: interpreter, uv, system deps
+    /nix/runtime/venv     the uv venv (all Python deps)
+    /nix/runtime/{bin,lib,...}   symlinkJoin of every closure
 """
 
 from __future__ import annotations
@@ -48,209 +47,161 @@ from importlib import resources
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from agentix.cli._resolve import REPO_ROOT, read_pyproject, short_name
+from agentix.cli._resolve import REPO_ROOT, detect_python_version, read_pyproject, short_name
 
-_SOURCE_SKIP = {
-    "__pycache__",
+# Directories never copied into the build context — caches, build
+# outputs, virtualenvs, VCS metadata. The context is hashed by Docker;
+# keeping it lean keeps builds fast and cacheable.
+_SOURCE_SKIP = frozenset({
+    ".git",
     ".venv",
+    "venv",
     "build",
     "dist",
-    ".git",
+    "result",
+    "__pycache__",
     ".pytest_cache",
     ".ruff_cache",
     ".mypy_cache",
-    "result",
-}
+    ".direnv",
+    "node_modules",
+})
+
+# Files staged verbatim from `agentix/nix/` into the build context.
+_BUILDER_FILES = ("flake.nix", "flake.lock", "Dockerfile", "bundle-build.sh")
 
 
-def _stage_project(src: Path, dest: Path) -> None:
-    """Copy the project tree into `dest`, skipping caches and build outputs."""
-    dest.mkdir(parents=True)
-    for item in src.iterdir():
-        if item.name in _SOURCE_SKIP or item.name.endswith(".egg-info"):
-            continue
-        d = dest / item.name
-        if item.is_dir():
-            shutil.copytree(item, d, ignore=shutil.ignore_patterns(*_SOURCE_SKIP))
-        else:
-            shutil.copy2(item, d)
+def _run(cmd: list[str], *, cwd: Path | None = None, capture: bool = False) -> subprocess.CompletedProcess:
+    """Run a subprocess, echoing the command; raise SystemExit on failure."""
+    print(f"$ {' '.join(cmd)}", file=sys.stderr)
+    proc = subprocess.run(cmd, cwd=cwd, capture_output=capture, text=True)
+    if proc.returncode != 0:
+        if capture:
+            sys.stderr.write(proc.stderr or "")
+        raise SystemExit(proc.returncode)
+    return proc
 
 
-def _stage_builder(dest: Path) -> None:
-    """Copy the shipped Nix builder (flake.nix, builder.nix, flake.lock) into `dest`."""
-    nix_dir = resources.files("agentix") / "nix"
-    dest.mkdir(parents=True)
-    for fname in ("flake.nix", "builder.nix", "flake.lock"):
-        src = nix_dir / fname
-        if not src.is_file():
-            raise SystemExit(f"shipped builder missing {fname!r} at {nix_dir}. Reinstall agentixx.")
-        (dest / fname).write_bytes(src.read_bytes())
+def git_toplevel(path: Path) -> Path | None:
+    """The git work-tree root containing `path`, or None when `path`
+    is not inside a git repository."""
+    proc = subprocess.run(
+        ["git", "-C", str(path), "rev-parse", "--show-toplevel"],
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        return None
+    top = proc.stdout.strip()
+    return Path(top).resolve() if top else None
 
 
-def _discover_plugin_nix(stage_plugin_dir: Path, project_src: Path) -> list[str]:
-    """Find every `default.nix` that contributes system binaries to the bundle.
+def resolve_context(src: Path) -> tuple[Path, Path]:
+    """Return `(context_root, project_subpath)` for a project at `src`.
 
-    Two sources, in order:
+    The context root is the project's git repository — copying the
+    whole repo is what lets in-container `uv sync` resolve path
+    dependencies that point outside the project directory (`../..`,
+    `../../plugins/*`). `project_subpath` locates the project within
+    the staged copy.
 
-    1. Plugin wheels installed under the `agentix` namespace
-       (`agentix.<short>/default.nix`). These ship via `pip install
-       agentix-<plugin>` and are how runtime extensions add their CLI
-       deps (e.g. `agentix-runtime-basic` adds `bash`).
-    2. The **user project root**'s own `default.nix`, if present —
-       lets a project pull in extra binaries (`claude`, `ffmpeg`, ...)
-       without packaging a fake plugin.
-
-    Each discovered file is copied into `stage_plugin_dir/<name>.nix`
-    so the flake context is self-contained; Nix won't follow absolute
-    paths outside the flake root. Returns the list of nix-relative
-    paths ready to drop into the generated wrapper flake.
+    A project not in a git repo is its own context (`project_subpath`
+    is `.`); that supports only registry/git Python deps, since there
+    is nothing outside the directory to copy.
     """
-    stage_plugin_dir.mkdir(parents=True)
-    nix_paths: list[str] = []
-
-    try:
-        agentix_root = resources.files("agentix")
-    except (ModuleNotFoundError, FileNotFoundError):
-        agentix_root = None
-
-    if agentix_root is not None:
-        for entry in agentix_root.iterdir():
-            if not entry.is_dir():
-                continue
-            nix_file = entry / "default.nix"
-            if not nix_file.is_file():
-                continue
-            short = entry.name
-            target = stage_plugin_dir / f"{short}.nix"
-            target.write_bytes(nix_file.read_bytes())
-            nix_paths.append(f"./plugins/{short}.nix")
-
-    # Project root default.nix, when present.
-    project_nix = project_src / "default.nix"
-    if project_nix.is_file():
-        target = stage_plugin_dir / "project.nix"
-        target.write_bytes(project_nix.read_bytes())
-        nix_paths.append("./plugins/project.nix")
-
-    return nix_paths
+    src = src.resolve()
+    top = git_toplevel(src)
+    if top is None:
+        return src, Path(".")
+    return top, src.relative_to(top)
 
 
-def _detect_python_version(pp: dict) -> str:
-    """Return the Nixpkgs python attr suffix (e.g. `311`, `312`, `313`).
+def _shipped(name: str) -> bytes:
+    """Read a builder file shipped as `agentix/nix/<name>` package data."""
+    f = resources.files("agentix") / "nix" / name
+    if not f.is_file():
+        raise SystemExit(f"shipped builder file {name!r} missing — reinstall agentixx")
+    return f.read_bytes()
 
-    Reads `[project].requires-python` lower bound; defaults to `311`.
+
+def stage_context(
+    stage: Path,
+    *,
+    context_root: Path,
+    python_version: str,
+) -> None:
+    """Lay out the Docker build context under `stage`.
+
+        stage/repo/            copy of the git repo (skip-listed)
+        stage/flake.nix        Nix builder (verbatim)
+        stage/flake.lock       pinned nixpkgs (verbatim)
+        stage/Dockerfile       build container (verbatim)
+        stage/bundle-build.sh  in-container orchestration (verbatim)
+        stage/python-version   interpreter minor, read by flake.nix
+        stage/closures/        empty — filled in-container by `_assemble`
     """
-    req = pp.get("project", {}).get("requires-python", "")
-    # Crude: pull the first `3.x` we see.
-    for token in req.replace(",", " ").split():
-        token = token.lstrip(">=~^! ")
-        if token.startswith("3."):
-            try:
-                minor = int(token.split(".")[1].rstrip(".*"))
-                if 10 <= minor <= 13:
-                    return f"3{minor}"
-            except (ValueError, IndexError):
-                continue
-    return "311"
+    stage.mkdir(parents=True, exist_ok=True)
+
+    repo_dest = stage / "repo"
+    shutil.copytree(
+        context_root,
+        repo_dest,
+        ignore=shutil.ignore_patterns(*_SOURCE_SKIP),
+        symlinks=True,
+    )
+
+    for name in _BUILDER_FILES:
+        (stage / name).write_bytes(_shipped(name))
+
+    (stage / "python-version").write_text(f"{python_version}\n")
+    (stage / "closures").mkdir(exist_ok=True)
+    # git won't track an empty dir; the flake guards on pathExists, but
+    # a marker keeps the dir present in the context tarball.
+    (stage / "closures" / ".keep").write_text("")
 
 
-def _parse_name(arg: str | None, pp: dict) -> tuple[str, str]:
-    """Parse `--name` into (name, tag).
+def _docker_build(stage: Path, *, name: str, tag: str, project_subpath: Path) -> str:
+    """`docker buildx build` the staged context; return the image ref.
 
-    Accepts:
-      * None              → (short_name(pp), pyproject_version)
-      * "NAME"            → ("NAME", pyproject_version)
-      * "NAME:TAG"        → ("NAME", "TAG")
+    A bare `NAME` is also tagged `NAME:latest` for convenience.
     """
-    project = pp.get("project", {})
-    default_version = project.get("version", "latest")
-    if not isinstance(default_version, str):
-        default_version = "latest"
+    ref = f"{name}:{tag}"
+    tags = ["-t", ref]
+    if tag != "latest":
+        tags += ["-t", f"{name}:latest"]
+    _run([
+        "docker",
+        "buildx",
+        "build",
+        "--load",
+        *tags,
+        "--build-arg",
+        f"AGENTIX_PROJECT_SUBPATH={project_subpath}",
+        "--progress=plain",
+        str(stage),
+    ])
+    return ref
+
+
+def parse_name(arg: str | None, pyproject: dict) -> tuple[str, str]:
+    """Parse `--name` into `(name, tag)`.
+
+      * None       → (short_name, pyproject version)
+      * "NAME"     → ("NAME", pyproject version)
+      * "NAME:TAG" → ("NAME", "TAG")
+    """
+    project = pyproject.get("project", {})
+    version = project.get("version")
+    default_tag = version if isinstance(version, str) and version else "latest"
 
     if arg is None:
-        return short_name(pp), default_version
+        return short_name(pyproject), default_tag
     if ":" in arg:
         name, _, tag = arg.partition(":")
         if not name or not tag:
-            raise SystemExit(f"--name {arg!r}: both sides of `:` must be non-empty")
+            raise SystemExit(f"--name {arg!r}: both sides of ':' must be non-empty")
         return name, tag
-    return arg, default_version
-
-
-def _render_wrapper(*, name: str, tag: str, python_version: str, plugin_nix_paths: list[str]) -> str:
-    """Substitute the wrapper.nix.tmpl with build-specific values."""
-    tmpl = (resources.files("agentix") / "nix" / "wrapper.nix.tmpl").read_text()
-    plugin_list = " ".join(plugin_nix_paths)
-    return (
-        tmpl.replace("@NAME@", name)
-        .replace("@TAG@", tag)
-        .replace("@SYSTEM@", "x86_64-linux")
-        .replace("@PYTHON_VERSION@", python_version)
-        .replace("@PLUGIN_NIX_LIST@", plugin_list)
-    )
-
-
-def _run(cmd: list[str], *, cwd: Path | None = None) -> None:
-    """Run a subprocess, stream stdout/stderr, raise on non-zero exit."""
-    print(f"$ {' '.join(cmd)}", file=sys.stderr)
-    proc = subprocess.run(cmd, cwd=cwd)
-    if proc.returncode != 0:
-        raise SystemExit(proc.returncode)
-
-
-def _build(stage: Path) -> str:
-    """Run `nix build` and `docker load`; return the loaded image ref."""
-    _run(
-        ["nix", "build", ".#bundle", "-o", "result", "--print-build-logs"],
-        cwd=stage,
-    )
-
-    result = stage / "result"
-    if not result.is_symlink() and not result.is_file():
-        raise SystemExit(f"nix build produced no result symlink at {result}")
-
-    # streamLayeredImage's result is a script that writes the tarball to stdout.
-    print("$ ./result | docker load", file=sys.stderr)
-    proc = subprocess.run(
-        f"{result} | docker load",
-        shell=True,
-        cwd=stage,
-        capture_output=True,
-        text=True,
-    )
-    sys.stderr.write(proc.stderr)
-    sys.stdout.write(proc.stdout)
-    if proc.returncode != 0:
-        raise SystemExit(proc.returncode)
-
-    # Parse "Loaded image: <ref>" from docker load output.
-    for line in proc.stdout.splitlines():
-        if line.startswith("Loaded image:"):
-            return line.split(":", 1)[1].strip()
-    raise SystemExit("docker load did not print 'Loaded image:'")
-
-
-def _tag_latest(loaded: str) -> str | None:
-    """Also tag the loaded image as `<name>:latest` for convenience.
-
-    Returns the alias ref on success, or None when the loaded ref isn't
-    `<name>:<version>` shape (e.g. user already passed `:latest`).
-    """
-    if ":" not in loaded:
-        return None
-    name, _, tag = loaded.rpartition(":")
-    if not name or tag == "latest":
-        return None
-    alias = f"{name}:latest"
-    proc = subprocess.run(
-        ["docker", "tag", loaded, alias],
-        capture_output=True,
-        text=True,
-    )
-    if proc.returncode != 0:
-        sys.stderr.write(proc.stderr)
-        return None
-    return alias
+    return arg, default_tag
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -269,74 +220,48 @@ def main(argv: Sequence[str] | None = None) -> int:
         "-n",
         "--name",
         default=None,
-        help="image NAME or NAME:TAG. Bare NAME gets ':<pyproject-version>' "
-        "appended; NAME:TAG is used verbatim. Default: derived from pyproject.",
+        help="image NAME or NAME:TAG. Bare NAME gets ':<pyproject-version>'; "
+        "NAME:TAG is used verbatim. Default: derived from pyproject.",
     )
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="stage build context to ./build/<name>/; do not invoke nix",
+        help="stage the build context to ./build/<name>/ and stop",
     )
     args = parser.parse_args(argv)
 
     src = Path(args.path).resolve()
     if not src.is_dir():
         raise SystemExit(f"{src}: not a directory")
-    pp = read_pyproject(src)
 
+    pyproject = read_pyproject(src)
     if not (src / "uv.lock").is_file():
         raise SystemExit(f"{src}/uv.lock missing — run `uv lock` first")
 
-    name, tag = _parse_name(args.name, pp)
-    python_version = _detect_python_version(pp)
-
-    def _stage(stage: Path) -> None:
-        _stage_builder(stage / "_builder")
-        _stage_project(src, stage / "project")
-        plugin_paths = _discover_plugin_nix(stage / "plugins", src)
-        wrapper = _render_wrapper(
-            name=name,
-            tag=tag,
-            python_version=python_version,
-            plugin_nix_paths=plugin_paths,
-        )
-        (stage / "flake.nix").write_text(wrapper)
-        # Flake needs a git repo to track files; init one with everything staged.
-        subprocess.run(
-            ["git", "init", "-q"],
-            cwd=stage,
-            stdout=subprocess.DEVNULL,
-            check=True,
-        )
-        subprocess.run(
-            ["git", "add", "-A"],
-            cwd=stage,
-            stdout=subprocess.DEVNULL,
-            check=True,
-        )
+    name, tag = parse_name(args.name, pyproject)
+    python_version = detect_python_version(pyproject)
+    context_root, project_subpath = resolve_context(src)
 
     if args.dry_run:
         out = REPO_ROOT / "build" / name
         if out.exists():
             shutil.rmtree(out)
-        out.mkdir(parents=True)
-        _stage(out)
+        stage_context(out, context_root=context_root, python_version=python_version)
         print(f"staged build context → {out}")
-        print(f"would build → {name}:{tag}")
-        print(f"  python → 3.{python_version[1:]}")
-        print(f"  plugin nix files → {len(list((out / 'plugins').iterdir()))}")
+        print(f"  image            → {name}:{tag}")
+        print(f"  python           → 3.{python_version[1:]}")
+        print(f"  context root     → {context_root}")
+        print(f"  project subpath  → {project_subpath}")
         return 0
 
     with TemporaryDirectory(prefix="agentix-build-") as tmp:
-        stage = Path(tmp)
-        _stage(stage)
-        loaded = _build(stage)
-        alias = _tag_latest(loaded)
-        print(f"\nimage ready → {loaded}", file=sys.stderr)
-        if alias:
-            print(f"            → {alias}", file=sys.stderr)
-        # Stage path is destroyed on exit; nothing else to do.
-        return 0
+        stage = Path(tmp) / "ctx"
+        stage_context(stage, context_root=context_root, python_version=python_version)
+        ref = _docker_build(stage, name=name, tag=tag, project_subpath=project_subpath)
+        print(f"\nimage ready → {ref}", file=sys.stderr)
+        if tag != "latest":
+            print(f"            → {name}:latest", file=sys.stderr)
+    return 0
 
 
 if __name__ == "__main__":

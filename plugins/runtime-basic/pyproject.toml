@@ -31,11 +31,13 @@ module-name = ["agentix.bash", "agentix.files"]
 module-root = ""
 namespace = true
 
-# Two sandbox namespaces from one wheel — the framework spawns one
-# worker per namespace from the same venv. They're consolidated here
-# because they share a deployment lifecycle (every sandbox needs both)
-# and carry no deps beyond the stdlib + agentix.
-[project.entry-points."agentix.namespace"]
+# System-dep closures. Each value names a module that ships a
+# `default.nix` (`{ pkgs }: drv`) as package data; `agentix build`
+# walks this group to discover and merge plugin system binaries into
+# the bundle — see `agentix.cli._assemble`. The entry point is the
+# only declaration a plugin makes; namespace *registration* is the
+# separate, imperative `agentix.register_namespace(...)` call.
+[project.entry-points."agentix.nix"]
 bash = "agentix.bash"
 files = "agentix.files"
 
