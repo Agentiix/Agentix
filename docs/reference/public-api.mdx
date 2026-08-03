@@ -318,7 +318,12 @@ These modules are public once their plugin package is installed:
   - `Proxy`, `on`, `Request`, `ClientResponse`, `Client`, `Handler`,
     `TunnelHandle`, `AbridgeError`, `DynamicRoutes`
   - `Forward`, `SessionForward` (forward to a host-side sidecar / gateway)
-  - `Recorder` (record tunnel request/response pairs to JSONL)
+  - `Recorder` (record tunnel traffic as `abridge.record.v1` JSONL)
+  - `CaptureLevel`, `RequestFacts`, `ResponseFacts`, `PrefixRelation`,
+    `PrefixTracker`, `request_facts(...)`, `response_facts(...)`,
+    `RECORD_SCHEMA_VERSION`, `SESSION_META_SCHEMA_VERSION`
+    (the record's capture ladder and derivations — see
+    `agentix/bridge/capture.py`)
   - `Sidecar`, `SidecarError`, `Command`
   - handler clients under `agentix.bridge.clients` (`AnthropicClient`,
     `OpenAIClient`, `AnthropicFromOpenAIClient`, `AnthropicToOpenAI`)

@@ -71,11 +71,13 @@ clients remain valid while sidecar gateways mature.
    `@on(path)` by index. Useful for offline eval reruns, RL buffer
    regression tests, CI-friendly assertions without burning tokens.
 
-4. **Capture API.** Today storage is gone from the core (skipped in
-   the recent cleanup). Add `agentix.bridge.capture` — a small hook
-   that any handler can call (or a Proxy-level event subscriber) to
-   record full `(request, response)` pairs. Lightweight; in-memory
-   list with optional `JsonlSink` / `ParquetSink` overlays.
+4. **Capture API.** Shipped as `agentix.bridge.capture` (the
+   `abridge.record.v1` shape, capture levels, and the prefix relation)
+   plus the `Recorder` JSONL sink. Still open: an in-memory sink for
+   tests, a columnar (`ParquetSink`) overlay for large corpora, and
+   structure recovery for an opaque SSE body relayed by a bare
+   `Forward` — today such a row keeps the bytes and says so rather
+   than reconstructing blocks the tunnel never decoded.
 
 ## Medium-term — additional bundled clients
 

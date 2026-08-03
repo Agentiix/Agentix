@@ -212,7 +212,7 @@ def test_tito_composition_with_record_dir_joins_rows_to_gateway_calls(fake_tito:
     """--record-dir in tito mode: the message-level Recorder row and the
     gateway's x-request-id share one id, and the row's session_id is the
     caller-derived serve session (the row->record join key set)."""
-    tc = TestClient(_tito_app(fake_tito, "--record-dir", str(tmp_path)))
+    tc = TestClient(_tito_app(fake_tito, "--record-dir", str(tmp_path), "--capture-level", "verbatim"))
     r = tc.post("/v1/messages", json=_ANTHROPIC_BODY, headers={"x-api-key": "rollout-1"})
     assert r.status_code == 200
 
@@ -227,9 +227,51 @@ def test_tito_composition_with_record_dir_joins_rows_to_gateway_calls(fake_tito:
     assert row["gateway_session_id"] == call["session"] == _FakeTito.sessions[0]
     assert row["path"] == "/v1/messages"
     assert row["request"] == _ANTHROPIC_BODY  # the agent-side (Anthropic) shape
-    assert row["response"]["body"]["content"] == [{"type": "text", "text": "hello from tito"}]
+    assert row["response"]["content"] == [{"type": "text", "text": "hello from tito"}]
     # No file for the route-enumeration probe session.
     assert sorted(p.name for p in tmp_path.iterdir()) == [f"{serve_session}.jsonl"]
+
+
+def test_tito_composition_record_dir_defaults_to_metadata_level(fake_tito: str, tmp_path) -> None:
+    """--record-dir alone never puts prompts on disk: the default level keeps
+    the join keys and the prefix relation and drops the bodies. Turning
+    capture on must not silently turn verbatim capture on."""
+    tc = TestClient(_tito_app(fake_tito, "--record-dir", str(tmp_path)))
+    assert tc.post("/v1/messages", json=_ANTHROPIC_BODY, headers={"x-api-key": "rollout-1"}).status_code == 200
+
+    serve_session = session_id_for("rollout-1")
+    (row,) = [json.loads(line) for line in (tmp_path / f"{serve_session}.jsonl").read_text().splitlines()]
+    assert row["capture_level"] == "metadata"
+    assert "request" not in row and "response" not in row and "response_body" not in row
+    assert row["request_id"] and row["gateway_session_id"] == _FakeTito.sessions[0]
+    assert row["prefix"]["stable"] is True
+    assert "be brief" not in json.dumps(row) and "hello from tito" not in json.dumps(row)
+
+
+def test_record_rows_never_contain_caller_credentials(fake_tito: str, tmp_path) -> None:
+    """Even at the verbatim level a record cannot leak a credential: the
+    tunnel carries no HTTP metadata at all and `serve` only ever hashes the
+    caller key into a session id. That is a structural guarantee, not a
+    redaction pass that could miss a field."""
+    secret = "rollout-secret-do-not-log"
+    tc = TestClient(_tito_app(fake_tito, "--record-dir", str(tmp_path), "--capture-level", "verbatim"))
+    r = tc.post(
+        "/v1/messages",
+        json=_ANTHROPIC_BODY,
+        headers={"authorization": f"Bearer {secret}", "x-forwarded-for": "10.1.2.3"},
+    )
+    assert r.status_code == 200
+
+    text = (tmp_path / f"{session_id_for(secret)}.jsonl").read_text()
+    assert secret not in text
+    assert "authorization" not in text.lower()
+    assert "10.1.2.3" not in text
+
+
+def test_capture_level_off_records_nothing(fake_tito: str, tmp_path) -> None:
+    tc = TestClient(_tito_app(fake_tito, "--record-dir", str(tmp_path), "--capture-level", "off"))
+    assert tc.post("/v1/messages", json=_ANTHROPIC_BODY, headers={"x-api-key": "r1"}).status_code == 200
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_tito_streaming_agent_gets_replayed_sse(fake_tito: str) -> None:

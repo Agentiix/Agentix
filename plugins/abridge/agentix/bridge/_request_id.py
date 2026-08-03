@@ -22,17 +22,31 @@ id, which the caller-side capture cannot otherwise know (it exists only
 after the lazy session create). The `Recorder` clears it before each handler
 call and reads it afterwards into the row's `gateway_session_id`, restoring
 the session-level join between caller-side rows and gateway-side records.
+
+`current_response_message` flows the same way and carries the STRUCTURE the
+wire loses. An agent that asked for streaming gets `text/event-stream` bytes
+back, so a capture layer reading only `ClientResponse` would have to re-parse
+an SSE blob to find the assistant's `thinking` / `text` / `tool_use` blocks —
+exactly the kind of string-scraping this capture exists to eliminate. The
+Anthropic-face clients already hold the completed `Message` dict at that
+point (they drain the stream and re-render it), so they publish it here and
+the `Recorder` writes the object, not the blob.
 """
 
 from __future__ import annotations
 
 import uuid
 from contextvars import ContextVar
+from typing import Any
 
 current_request_id: ContextVar[str | None] = ContextVar("abridge_request_id", default=None)
 
 current_upstream_session_id: ContextVar[str | None] = ContextVar(
     "abridge_upstream_session_id", default=None
+)
+
+current_response_message: ContextVar[dict[str, Any] | None] = ContextVar(
+    "abridge_response_message", default=None
 )
 
 
@@ -46,9 +60,21 @@ def get_or_mint_request_id() -> str:
     return bound if bound else mint_request_id()
 
 
+def publish_response_message(message: dict[str, Any]) -> None:
+    """Hand the completed provider-native response to an outer capture layer.
+
+    A no-op when nothing is capturing — setting a `ContextVar` nobody reads
+    costs one assignment, so clients call this unconditionally rather than
+    branching on whether a `Recorder` happens to be installed.
+    """
+    current_response_message.set(message)
+
+
 __all__ = [
     "current_request_id",
+    "current_response_message",
     "current_upstream_session_id",
     "get_or_mint_request_id",
     "mint_request_id",
+    "publish_response_message",
 ]

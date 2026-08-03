@@ -32,6 +32,7 @@ from typing import Any
 
 from agentix.utils import trace
 
+from .._request_id import publish_response_message
 from ..proxy import ClientResponse, Handler, Request, TunnelHandle, _AsyncCloseable, on
 from ._anthropic_transforms import (
     anthropic_messages_to_openai,
@@ -98,6 +99,9 @@ class AnthropicToOpenAI:
                 openai_resp, response_model=str(request.body.get("model") or "")
             )
             populate_anthropic_span(request=request.body, response=anthropic_resp)
+            # Agent-facing shape, so the capture layer records the Anthropic
+            # Message the agent actually saw — structure, not an SSE blob.
+            publish_response_message(anthropic_resp)
             if request.body.get("stream"):
                 return ClientResponse.sse(anthropic_sse(anthropic_resp))
             return ClientResponse.json(anthropic_resp)

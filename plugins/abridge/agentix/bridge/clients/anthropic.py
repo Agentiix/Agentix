@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, Any
 
 from agentix.utils import trace
 
+from .._request_id import get_or_mint_request_id, publish_response_message
 from ..proxy import (
     AbridgeError,
     ClientResponse,
@@ -103,7 +104,9 @@ class AnthropicClient:
         body = dict(request.body)
         if self._model:
             body["model"] = self._model
-        record_id = uuid.uuid4().hex
+        # Reuses the id a wrapping capture layer (Recorder) bound for this
+        # call, so its JSONL row and the upstream header share one id.
+        record_id = get_or_mint_request_id()
         extra_headers = {
             "x-session-id": self.session_id,
             "x-request-id": record_id,
@@ -127,6 +130,10 @@ class AnthropicClient:
                         message = await stream_handle.get_final_message()
                     response_dict = message.model_dump(exclude_none=False)
                     populate_anthropic_span(request=request.body, response=response_dict)
+                    # The wire the agent gets is an SSE blob; hand the capture
+                    # layer the completed Message so `thinking` signatures and
+                    # `tool_use` inputs are recorded as structure, not text.
+                    publish_response_message(response_dict)
                     return ClientResponse.sse(_anthropic_sse_from_message(response_dict))
 
                 message = await self._client.messages.create(
@@ -137,6 +144,7 @@ class AnthropicClient:
                 raise AbridgeError(f"anthropic: {exc}", status_code=status) from exc
             response_dict = message.model_dump(exclude_none=False)
             populate_anthropic_span(request=request.body, response=response_dict)
+            publish_response_message(response_dict)
             return ClientResponse.json(response_dict)
 
     @on("/v1/messages/count_tokens")

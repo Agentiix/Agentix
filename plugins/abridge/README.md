@@ -131,22 +131,60 @@ Claude-speaking agent in front of an OpenAI-shaped recording gateway.
 
 ### Record the tunnel traffic
 
-`Recorder` wraps any handler client and appends one JSONL line per served
-call — `{ts, path, request_id, session_id?, request, response}` — flushed
-as it goes, so the file is complete up to the last call even if the host
-dies mid-rollout. It exposes the wrapped client's routes and closes it on
-teardown, so it drops in transparently:
+`Recorder` wraps any handler client and appends one `abridge.record.v1` JSONL
+line per served call, flushed as it goes, so the file is complete up to the
+last call even if the host dies mid-rollout. It exposes the wrapped client's
+routes and closes it on teardown, so it drops in transparently:
 
 ```python
-from agentix.bridge import Proxy, Recorder
+from agentix.bridge import CaptureLevel, Proxy, Recorder
 
-proxy = Proxy(Recorder(client, "runs/rollout-42.jsonl", session_id="rollout-42"))
+proxy = Proxy(Recorder(
+    client, "runs/rollout-42.jsonl",
+    session_id="rollout-42",
+    level=CaptureLevel.VERBATIM,   # default is METADATA
+))
 ```
+
+How much lands on disk is a level, and full capture is **opt-in**:
+
+| level | on disk |
+|---|---|
+| `off` | nothing — don't install a Recorder |
+| `metadata` (default) | identity, model, sampling, usage, tool **names**, per-message digests, the response block skeleton, and the prefix relation. No conversation text. |
+| `verbatim` | all of the above **plus** the complete request body (`system`, `tools` with full schemas, the entire message history) and the complete structured response (`thinking` with its opaque `signature`, `text`, `tool_use`). |
+
+`agentix/bridge/capture.py`'s module docstring is the normative schema
+document. The two fields worth knowing about up front:
+
+- **`prefix`** — whether this request's message list *extends* the previous
+  one. `"stable": false` means **the context was rewritten** (compaction, a
+  retry rollback, a fresh conversation on the same key), with
+  `divergence_index` pointing at the first message that differs. A consumer
+  reads that one boolean instead of parsing a harness's own compaction
+  boundary records. It is the Anthropic-face analogue of the token gateway's
+  `prefix_stable`, computed over per-message digests because this layer has
+  no tokenizer. Interleaved conversations (subagents, helper calls) are kept
+  in separate lanes keyed by the system prompt, so alternating between them
+  is not mistaken for a rewrite; a lane collision reports `false`, never a
+  false `true`.
+- **`shape.content_blocks`** — one entry per block the model emitted, so
+  `{"type": "thinking", "chars": 0, "signature_chars": 210}` is visible even
+  at the metadata level. Streaming responses are recorded as the structured
+  `Message` (the bundled clients publish it), not as an SSE blob to re-parse.
 
 The `request_id` in each row is the same id the transport stamps as
 `x-request-id` on the upstream hop (bound through a context var), so a
 message-level row joins a downstream token recorder's per-turn record;
 `session_id`, when given, tags every row with the rollout identity.
+`turn_index` is monotonic per file and advances even when a row fails to
+serialize, so a dropped row leaves a detectable gap; `aclose()` appends an
+`abridge.session.v1` trailer, so a truncated file is distinguishable from a
+closed one.
+
+Records never contain credentials — the tunnel carries no HTTP metadata at
+all (`Request` is a path plus the decoded JSON body), so no `Authorization`
+header or API key can reach one. Files are created `0600`.
 
 ## Writing your own handler
 
@@ -293,6 +331,9 @@ More serve options:
   own session id, i.e. the `session_id` in its token records. The same
   `request_id` reaches the upstream as `x-request-id`, so message rows
   join the gateway's token records per call as well as per session.
+* `--capture-level {off,metadata,verbatim}` (env `ABRIDGE_CAPTURE_LEVEL`,
+  default `metadata`) — how much of each call `--record-dir` persists.
+  Turning recording on never turns verbatim capture on; ask for it.
 
 `GET /_health` reports `translation_spec_sha` — one SHA-256 over the
 source of the Anthropic↔OpenAI transform module and both client modules
@@ -315,6 +356,8 @@ agentix/bridge/
 ├── proxy.py                       # Proxy + @on + sandbox tunnel + wire types
 ├── serve.py                       # direct mode: @on handlers as a standalone HTTP service
 ├── forward.py                     # JSON POST forwarding to a host-side service
+├── capture.py                     # abridge.record.v1: capture levels, digests, prefix relation
+├── recorder.py                    # Recorder: the JSONL sink for that record
 ├── sidecar.py                     # local process lifecycle + health supervision
 └── clients/                       # bundled handler implementations
     ├── openai.py                  # OpenAIClient (openai SDK) + PLACEHOLDER_API_KEY

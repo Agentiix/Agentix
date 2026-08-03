@@ -58,9 +58,12 @@ Two upstream modes, mutually exclusive:
   default keeps them for harvest.
 
 `--record-dir` (either mode) wraps each session's client in a `Recorder`
-writing message-level rows to `<record_dir>/<session_id>.jsonl`; rows
+writing `abridge.record.v1` rows to `<record_dir>/<session_id>.jsonl`; rows
 carry `session_id` + `request_id`, and the same `request_id` is stamped
 as `x-request-id` on the upstream hop so message rows join token records.
+`--capture-level` picks how much of each call is persisted — `metadata`
+(default: no conversation text) or `verbatim` (complete request body and
+structured response). See `capture.py` for the schema.
 
 `GET /_health` reports `translation_spec_sha` — the SHA-256 of the
 Anthropic<->OpenAI transform module — so downstream data contracts can
@@ -76,7 +79,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import hashlib
-import json
 import logging
 import os
 from collections import OrderedDict
@@ -91,6 +93,7 @@ from fastapi import FastAPI
 from fastapi import Request as FastAPIRequest
 from fastapi.responses import JSONResponse, Response
 
+from .capture import CaptureLevel, canonical_text
 from .proxy import (
     AbridgeError,
     Client,
@@ -437,10 +440,23 @@ def _build_parser() -> argparse.ArgumentParser:
         "--record-dir",
         default=os.environ.get("ABRIDGE_RECORD_DIR"),
         help=(
-            "record every served (request, response) pair to "
-            "<record-dir>/<session_id>.jsonl via Recorder — message-level rows with "
-            "session_id + request_id (+ gateway_session_id in tito mode), flushed "
-            "per line (env: ABRIDGE_RECORD_DIR)"
+            "record every served call to <record-dir>/<session_id>.jsonl via Recorder "
+            "as abridge.record.v1 rows — session_id + request_id (+ gateway_session_id "
+            "in tito mode) and the prefix relation, flushed per line "
+            "(env: ABRIDGE_RECORD_DIR)"
+        ),
+    )
+    parser.add_argument(
+        "--capture-level",
+        choices=[level.value for level in CaptureLevel],
+        default=os.environ.get("ABRIDGE_CAPTURE_LEVEL", CaptureLevel.METADATA.value),
+        help=(
+            "how much of each call --record-dir persists: 'metadata' (default) writes "
+            "identity, sampling, usage, tool names, per-message digests and the prefix "
+            "relation but no conversation text; 'verbatim' adds the complete request "
+            "body (system, full tool schemas, whole history) and the complete "
+            "structured response (thinking signatures, text, tool_use); 'off' records "
+            "nothing (env: ABRIDGE_CAPTURE_LEVEL)"
         ),
     )
     parser.add_argument(
@@ -455,28 +471,6 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _canonical_text(value: Any) -> str:
-    """Flatten Anthropic content (str or block list) to conversation-identity
-    text: text blocks contribute their text (cache_control and other
-    tokenization-irrelevant decorations are ignored), other blocks their
-    sorted-JSON form."""
-    if value is None:
-        return ""
-    if isinstance(value, str):
-        return value
-    if isinstance(value, list):
-        parts: list[str] = []
-        for block in value:
-            if isinstance(block, str):
-                parts.append(block)
-            elif isinstance(block, dict) and block.get("type") == "text":
-                parts.append(str(block.get("text", "")))
-            else:
-                parts.append(json.dumps(block, sort_keys=True, ensure_ascii=False, default=repr))
-        return "\n".join(parts)
-    return json.dumps(value, sort_keys=True, ensure_ascii=False, default=repr)
-
-
 def _conversation_key(body: dict[str, Any]) -> str:
     """A logical-conversation key for an Anthropic Messages request: the
     canonicalized system prompt + first user message. Turns of one
@@ -487,7 +481,7 @@ def _conversation_key(body: dict[str, Any]) -> str:
         (m.get("content") for m in body.get("messages") or [] if isinstance(m, dict) and m.get("role") == "user"),
         None,
     )
-    blob = _canonical_text(body.get("system")) + "\x00" + _canonical_text(first_user)
+    blob = canonical_text(body.get("system")) + "\x00" + canonical_text(first_user)
     return hashlib.sha256(blob.encode()).hexdigest()[:16]
 
 
@@ -600,7 +594,10 @@ def _client_factory(args: argparse.Namespace) -> Callable[[str], Client]:
                 session_id=session_id,
             )
 
-    if not args.record_dir:
+    level = CaptureLevel(getattr(args, "capture_level", CaptureLevel.METADATA.value))
+    if not args.record_dir or level is CaptureLevel.OFF:
+        if args.record_dir:
+            logger.warning("abridge serve: --record-dir set with --capture-level off — nothing will be recorded")
         return build
 
     from .recorder import Recorder
@@ -608,7 +605,9 @@ def _client_factory(args: argparse.Namespace) -> Callable[[str], Client]:
     record_dir = Path(args.record_dir)
 
     def build_recorded(session_id: str) -> Client:
-        return Recorder(build(session_id), record_dir / f"{session_id}.jsonl", session_id=session_id)
+        return Recorder(
+            build(session_id), record_dir / f"{session_id}.jsonl", session_id=session_id, level=level
+        )
 
     return build_recorded
 
