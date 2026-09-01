@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
 from .discovery import DEFAULT_BACKEND_PROBE_CANDIDATES
 
@@ -29,6 +30,10 @@ class TITOGatewayConfig:
     chat_template_path: str | None = None
     tito_model: str = "default"
     tito_allowed_append_roles: tuple[str, ...] = ("tool",)
+    # Extra chat-template variables pinned for every render (e.g. Qwen3.8
+    # `reasoning_effort`). Stored as a sorted tuple of (key, value) pairs so the
+    # frozen config stays hashable; see `chat_template_kwargs`.
+    tito_chat_template_kwargs: tuple[tuple[str, Any], ...] = ()
     session_server_ip: str = "127.0.0.1"
     session_server_port: int = 30000
     router_timeout: float = 600.0
@@ -55,6 +60,14 @@ class TITOGatewayConfig:
             raise ValueError(f"unsupported tito append roles: {invalid}")
         object.__setattr__(self, "tito_allowed_append_roles", normalized_roles or ("tool",))
 
+        normalized_kwargs = tuple(sorted(dict(self.tito_chat_template_kwargs).items()))
+        for key, _ in normalized_kwargs:
+            if not isinstance(key, str) or not key:
+                raise ValueError("tito_chat_template_kwargs keys must be non-empty strings")
+        if "chat_template" in dict(normalized_kwargs):
+            raise ValueError("tito_chat_template_kwargs must not carry 'chat_template'; use chat_template_path")
+        object.__setattr__(self, "tito_chat_template_kwargs", normalized_kwargs)
+
         if self.routing_policy not in ("sticky", "round_robin"):
             raise ValueError(
                 f"routing_policy must be 'sticky' or 'round_robin'; got {self.routing_policy!r}"
@@ -68,6 +81,10 @@ class TITOGatewayConfig:
         if self.max_sessions is not None and self.max_sessions < 1:
             raise ValueError(f"max_sessions must be >= 1; got {self.max_sessions!r}")
 
+    @property
+    def chat_template_kwargs(self) -> dict[str, Any]:
+        return dict(self.tito_chat_template_kwargs)
+
     @classmethod
     def from_cli_values(
         cls,
@@ -78,6 +95,7 @@ class TITOGatewayConfig:
         tito_model: str,
         tito_allowed_append_roles: list[str],
         session_server_ip: str,
+        tito_chat_template_kwargs: dict[str, Any] | None = None,
         session_server_port: int,
         router_timeout: float,
         backend_urls: list[str] | None = None,
@@ -100,6 +118,7 @@ class TITOGatewayConfig:
             chat_template_path=chat_template_path,
             tito_model=tito_model,
             tito_allowed_append_roles=tuple(tito_allowed_append_roles),
+            tito_chat_template_kwargs=tuple((tito_chat_template_kwargs or {}).items()),
             session_server_ip=session_server_ip,
             session_server_port=session_server_port,
             router_timeout=router_timeout,
@@ -120,6 +139,7 @@ class TITOGatewayConfig:
             chat_template_path=self.chat_template_path,
             tito_model=self.tito_model,
             tito_allowed_append_roles=list(self.tito_allowed_append_roles),
+            tito_chat_template_kwargs=self.chat_template_kwargs,
             trust_remote_code=self.trust_remote_code,
             session_server_ip=self.session_server_ip,
             session_server_port=self.session_server_port,

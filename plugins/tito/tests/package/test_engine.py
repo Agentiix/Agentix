@@ -12,7 +12,7 @@ import pytest
 from agentix.tito.engine.compare import MismatchType, TokenSeqComparator
 from agentix.tito.engine.errors import TokenizationError
 from agentix.tito.engine.messages import assert_messages_append_only_with_allowed_role, message_matches
-from agentix.tito.engine.pretokenize import Qwen3TITOTokenizer, get_tito_tokenizer
+from agentix.tito.engine.pretokenize import Qwen3_5TITOTokenizer, Qwen3TITOTokenizer, get_tito_tokenizer
 from agentix.tito.engine.trajectory import LinearTrajectory, SessionRegistry
 from tokenizers import Tokenizer, models, pre_tokenizers
 from transformers import PreTrainedTokenizerFast
@@ -305,3 +305,82 @@ def test_version_advances_on_rollback_and_update(tok):
     )
     assert tr.num_assistant == n0
     assert tr.version != v0
+
+
+# A Qwen3.5-shaped template on the tiny vocab: raises without a real user
+# turn, wraps tool results in a user turn, and writes `<|im_end|>` + newline
+# after every message — the properties the qwen3_5 family exists for.
+_QWEN35_LIKE_TEMPLATE = (
+    "{%- set ns = namespace(found=false) -%}"
+    "{%- for m in messages -%}{%- if m['role'] == 'user' -%}{%- set ns.found = true -%}{%- endif -%}{%- endfor -%}"
+    "{%- if not ns.found -%}{{ raise_exception('No user query found in messages.') }}{%- endif -%}"
+    "{%- for m in messages -%}"
+    "{%- if m['role'] == 'system' and not loop.first -%}"
+    "{{ raise_exception('System message must be at the beginning.') }}{%- endif -%}"
+    "{%- if m['role'] == 'tool' -%}<|im_start|>user {{ m['content'] or '' }}<|im_end|>{{ '\\n' }}"
+    "{%- else -%}<|im_start|>{{ m['role'] }} {{ m['content'] or '' }}<|im_end|>{{ '\\n' }}{%- endif -%}"
+    "{%- endfor -%}"
+    "{%- if add_generation_prompt -%}<|im_start|>assistant {%- endif -%}"
+)
+
+
+@pytest.fixture(scope="module")
+def qwen35_like_tok():
+    specials = ["<unk>", "<s>", "</s>", "<|im_start|>", "<|im_end|>"]
+    words = ["system", "user", "assistant", "tool", "dummy", "You", "are", "ok",
+             "done", "compute", "17", "23", "391", "X", "Y", "Hello", "\n"]
+    vocab = {t: i for i, t in enumerate(specials + words)}
+    tk = Tokenizer(models.WordLevel(vocab=vocab, unk_token="<unk>"))
+    tk.pre_tokenizer = pre_tokenizers.WhitespaceSplit()
+    t = PreTrainedTokenizerFast(
+        tokenizer_object=tk, unk_token="<unk>", bos_token="<s>", eos_token="</s>",
+        additional_special_tokens=["<|im_start|>", "<|im_end|>"],
+    )
+    # The Qwen families need "\n" to be one token (the `<|im_end|>` newline fixup).
+    t.add_tokens(["\n"])
+    t.chat_template = _QWEN35_LIKE_TEMPLATE
+    return t
+
+
+def test_qwen3_5_family_renders_synthetic_contexts_with_a_user_turn(qwen35_like_tok):
+    tok = qwen35_like_tok
+    # The `default` engine's synthetic base (dummy system only) is rejected by
+    # this template family ...
+    default = get_tito_tokenizer(tok, "default", allowed_append_roles=("tool",))
+    with pytest.raises(ValueError):
+        default.tokenize_additional_non_assistant(
+            [{"role": "user", "content": "Hello"}, {"role": "assistant", "content": "ok"}],
+            [{"role": "user", "content": "Hello"}, {"role": "assistant", "content": "ok"},
+             {"role": "tool", "content": "17", "tool_call_id": "c1"}],
+        )
+    # ... while qwen3_5 carries a dummy user turn and the incremental result
+    # equals the from-scratch render (the engine invariant).
+    tt = get_tito_tokenizer(tok, "qwen3_5", allowed_append_roles=("tool",))
+    assert isinstance(tt, Qwen3_5TITOTokenizer)
+    assert tt.tool_call_parser == "qwen3_coder"
+    old = [{"role": "system", "content": "You are"}, {"role": "user", "content": "Hello"},
+           {"role": "assistant", "content": "ok"}]
+    new = old + [{"role": "tool", "content": "17", "tool_call_id": "c1"}]
+    prefix = tt.render_messages(old, add_generation_prompt=False, tokenize=True)
+    merged = tt.merge_tokens(old, new, prefix)
+    assert merged == tt.render_messages(new, add_generation_prompt=True, tokenize=True)
+
+
+def test_qwen3_5_family_rejects_mid_conversation_system_append(qwen35_like_tok):
+    tt = get_tito_tokenizer(qwen35_like_tok, "qwen3_5", allowed_append_roles=("tool", "system"))
+    old = [{"role": "user", "content": "Hello"}, {"role": "assistant", "content": "ok"}]
+    with pytest.raises(ValueError, match="position 0"):
+        tt.tokenize_additional_non_assistant(old, old + [{"role": "system", "content": "X"}])
+
+
+def test_chat_template_kwargs_are_pinned_into_every_render(qwen35_like_tok):
+    tok = qwen35_like_tok
+    tok.chat_template = "{{ effort }}:" + _QWEN35_LIKE_TEMPLATE
+    try:
+        tt = get_tito_tokenizer(tok, "qwen3_5", chat_template_kwargs={"effort": "X"})
+        text = tt.render_messages([{"role": "user", "content": "Hello"}], add_generation_prompt=True)
+        assert text.startswith("X:")
+        with pytest.raises(ValueError, match="chat_template"):
+            get_tito_tokenizer(tok, "qwen3_5", chat_template_kwargs={"chat_template": "y"})
+    finally:
+        tok.chat_template = _QWEN35_LIKE_TEMPLATE

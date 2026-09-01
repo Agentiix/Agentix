@@ -244,7 +244,12 @@ async def test_vllm_forces_token_recording_fields(gateway):
         json={**_CHAT, "stream": True, "stream_options": {"include_usage": True}},
     )
     assert r.status_code == 200
-    assert r.json()["choices"][0]["message"]["content"] == "ok done"
+    # The client asked for a stream, so the completed turn comes back as SSE.
+    assert r.headers["content-type"].startswith("text/event-stream")
+    lines = [line for line in r.text.split("\n") if line.startswith("data: ")]
+    events = [json.loads(line[6:]) for line in lines if line != "data: [DONE]"]
+    assert events[0]["choices"][0]["delta"]["content"] == "ok done"
+    assert events[-1]["choices"][0]["finish_reason"] == "stop"
 
     render_body = replica.calls["render"][0]
     assert render_body["logprobs"] is True

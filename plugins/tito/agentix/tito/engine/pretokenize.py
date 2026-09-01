@@ -20,6 +20,7 @@ from .render import apply_chat_template
 TEMPLATE_DIR = Path(__file__).parent / "templates"
 _VALID_ROLES = frozenset({"tool", "user", "system"})
 _DUMMY_SYSTEM: dict[str, Any] = {"role": "system", "content": "dummy system"}
+_DUMMY_USER: dict[str, Any] = {"role": "user", "content": "dummy user"}
 
 
 def _build_dummy_assistant(tool_responses: list[dict[str, Any]]) -> dict[str, Any]:
@@ -233,7 +234,62 @@ class Qwen3TITOTokenizer(TITOTokenizer):
         return prefix
 
 
+class Qwen3_5TITOTokenizer(Qwen3TITOTokenizer):
+    """Qwen3.5 / Qwen3.8 (`Qwen3_5ForConditionalGeneration`): the tokenizer's OWN
+    chat template, not a bundled fixed one.
+
+    Two properties of that template family shape this subclass (verified on the
+    real Qwen/Qwen3.8-27B tokenizer, 2026-09-02):
+
+    - it raises ``No user query found in messages`` when the conversation has
+      no real user turn, so the synthetic contexts the incremental algorithm
+      renders (`dummy system` + `dummy assistant`) must also carry a dummy
+      user message — the suffix diff is unaffected because the dummy turns are
+      in both renders;
+    - an appended ``system`` message raises ``System message must be at the
+      beginning``, so only ``tool`` (and, for Qwen3.8 whose template defaults
+      to ``preserve_thinking``, ``user``) appends are supported.
+
+    Reasoning is rendered from ``reasoning_content`` only (the `</think>`
+    content-splitting fallback of Qwen3 is gone), tool calls use the
+    ``<function=…><parameter=…>`` XML dialect (vLLM parser ``qwen3_coder``),
+    and the model stops at ``<|im_end|>`` without the template's trailing
+    newline exactly like Qwen3, so ``fix_prefix`` is inherited.
+
+    ``chat_template_kwargs`` is where the caller pins template variables that
+    change the rendered prompt — for Qwen3.8 ``reasoning_effort``
+    (``xhigh``/``medium``/``low``; the template default is ``xhigh``) and
+    ``preserve_thinking``. They are part of the tokenizer identity the record
+    carries via ``chat_template_sha256`` only indirectly, so a gateway serving
+    one experiment must run with one fixed set.
+    """
+
+    reasoning_parser = "qwen3"
+    tool_call_parser = "qwen3_coder"
+
+    def _synthetic_base(self) -> list[dict[str, Any]]:
+        return [_DUMMY_SYSTEM, _DUMMY_USER]
+
+    def _tokenize_tool_segment(
+        self, appended_messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None
+    ) -> list[int]:
+        return self._tokenize_rendered_suffix(
+            [*self._synthetic_base(), _build_dummy_assistant(appended_messages)], appended_messages, tools=tools
+        )
+
+    def _tokenize_user_and_system_segment(
+        self, appended_message: dict[str, Any], tools: list[dict[str, Any]] | None = None
+    ) -> list[int]:
+        if appended_message.get("role") == "system":
+            raise ValueError(
+                "the Qwen3.5/3.8 chat template only accepts a system message at position 0; "
+                "appending one mid-conversation cannot be tokenized incrementally"
+            )
+        return self._tokenize_rendered_suffix(self._synthetic_base(), [appended_message], tools=tools)
+
+
 _QWEN3_FIXED = "qwen3_fixed.jinja"
+SUPPORTED_TOKENIZER_TYPES = ("default", "qwen3", "qwen3_5")
 
 
 def get_tito_tokenizer(
@@ -241,22 +297,36 @@ def get_tito_tokenizer(
     tokenizer_type: str = "qwen3",
     *,
     allowed_append_roles: tuple[str, ...] = ("tool",),
+    chat_template_kwargs: dict[str, Any] | None = None,
 ) -> TITOTokenizer:
     """Build a TITO tokenizer. `default` uses the tokenizer's own chat template
     (model-agnostic); `qwen3` loads the bundled fixed template (and disables thinking
-    clearing when `user` appends are allowed, so earlier turns keep their reasoning)."""
+    clearing when `user` appends are allowed, so earlier turns keep their reasoning);
+    `qwen3_5` uses the tokenizer's own Qwen3.5/3.8 template with the synthetic-context
+    fix that family needs. `chat_template_kwargs` are extra template variables pinned
+    for every render (e.g. Qwen3.8 ``reasoning_effort``); for `qwen3` they merge on
+    top of the fixed-template override."""
     if tokenizer is None:
         raise ValueError("tokenizer must not be None")
     roles = frozenset(allowed_append_roles)
     invalid = roles - _VALID_ROLES
     if invalid:
         raise ValueError(f"unknown roles in allowed_append_roles: {sorted(invalid)}; valid: {sorted(_VALID_ROLES)}")
+    extra = dict(chat_template_kwargs or {})
+    if "chat_template" in extra:
+        raise ValueError("chat_template_kwargs must not carry 'chat_template'; use --chat-template-path")
 
     if tokenizer_type == "default":
-        return TITOTokenizer(tokenizer, allowed_append_roles=list(allowed_append_roles))
+        return TITOTokenizer(tokenizer, chat_template_kwargs=extra, allowed_append_roles=list(allowed_append_roles))
     if tokenizer_type == "qwen3":
         kw: dict[str, Any] = {"chat_template": (TEMPLATE_DIR / _QWEN3_FIXED).read_text()}
         if "user" in roles:
             kw["clear_thinking"] = False
+        kw.update(extra)
         return Qwen3TITOTokenizer(tokenizer, chat_template_kwargs=kw, allowed_append_roles=list(allowed_append_roles))
-    raise ValueError(f"unsupported tokenizer_type {tokenizer_type!r}; supported: 'qwen3', 'default'")
+    if tokenizer_type == "qwen3_5":
+        return Qwen3_5TITOTokenizer(
+            tokenizer, chat_template_kwargs=extra, allowed_append_roles=list(allowed_append_roles)
+        )
+    supported = ", ".join(repr(t) for t in SUPPORTED_TOKENIZER_TYPES)
+    raise ValueError(f"unsupported tokenizer_type {tokenizer_type!r}; supported: {supported}")

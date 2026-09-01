@@ -31,6 +31,35 @@ The algorithm is **model-agnostic** (base `TITOTokenizer`); a model family is a
 fixed chat template plus a tiny boundary fixup — e.g. `Qwen3TITOTokenizer`
 re-inserts the `\n` after `<|im_end|>` that the model omits when it stops.
 
+Families (`--tito-model`):
+
+- `default` — the tokenizer's own template, no fixups.
+- `qwen3` — bundled fixed Qwen3 template (`qwen3_fixed.jinja`) + newline fixup.
+- `qwen3_5` — Qwen3.5 **and Qwen3.8** (`Qwen3_5ForConditionalGeneration`):
+  the tokenizer's own template + the Qwen3 newline fixup + a synthetic
+  context that carries a dummy user turn, because this template family
+  raises `No user query found in messages` otherwise. Tool calls are the
+  `<function=…><parameter=…>` dialect (vLLM `--tool-call-parser qwen3_coder`),
+  reasoning comes from `reasoning_content` only. Pin the template variables
+  that change the prompt with `--tito-chat-template-kwargs`, e.g.
+  `'{"reasoning_effort": "xhigh"}'` for Qwen3.8 (its default is `xhigh`;
+  `medium`/`low` are the other legal values). Appending `system` messages
+  mid-conversation is rejected; `user` appends are safe on Qwen3.8 (whose
+  template preserves earlier thinking by default) but clear earlier-turn
+  reasoning on Qwen3.5, so keep `--tito-allowed-append-roles tool` there.
+
+## Streaming clients
+
+The gateway forces `stream=false` upstream (the token harvest needs the full
+JSON body). A client that sent `stream: true` — Pi's `openai-completions`
+provider, the OpenAI SDK with `stream=True` — gets the **completed turn
+re-framed as Server-Sent Events**: one chunk with the whole assistant delta
+(`role`, `content`, the backend's reasoning field, `tool_calls` with `index`),
+one terminal chunk with `finish_reason` and `usage`, then `data: [DONE]`. The
+response carries `x-tito-stream: reframed`; content is identical to the JSON
+body, only the framing changes. Non-200 upstream answers pass through as
+JSON regardless of framing.
+
 ## Backend kinds
 
 The token dialect is selected by `--backend-kind` (`TITOGatewayConfig.backend_kind`):
@@ -72,8 +101,9 @@ agentix-tito serve \
   --session-server-port 30001
 ```
 
-`--tito-model` selects the tokenizer family (`qwen3`, or `default` for the
-tokenizer's own template). `--backend-kind` selects the backend token dialect
+`--tito-model` selects the tokenizer family (`qwen3`, `qwen3_5`, or `default`
+for the tokenizer's own template); `--tito-chat-template-kwargs` pins extra
+template variables as a JSON object. `--backend-kind` selects the backend token dialect
 (`sglang` default, or `vllm`). `--backend-url` may be omitted to auto-discover
 a local backend (see `agentix.tito.discovery`). Run `agentix-tito serve -h`
 for the full list.

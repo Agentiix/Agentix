@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 
@@ -60,6 +61,16 @@ def _add_serve_arguments(parser: argparse.ArgumentParser) -> None:
         help="TITO tokenizer family (qwen3, or default for the tokenizer's own template).",
     )
     parser.add_argument(
+        "--tito-chat-template-kwargs",
+        default=None,
+        metavar="JSON",
+        help=(
+            "JSON object of extra chat-template variables pinned for every render, "
+            'e.g. \'{"reasoning_effort": "xhigh"}\' for Qwen3.8 (tito-model qwen3_5). '
+            "The prompt tokens the model sees are rendered with exactly these values."
+        ),
+    )
+    parser.add_argument(
         "--tito-allowed-append-roles",
         nargs="+",
         choices=["tool", "user", "system"],
@@ -108,6 +119,18 @@ def _add_serve_arguments(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _parse_template_kwargs(raw: str | None) -> dict[str, object]:
+    if raw is None or raw.strip() == "":
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except ValueError as e:
+        raise SystemExit(f"--tito-chat-template-kwargs is not valid JSON: {e}") from e
+    if not isinstance(parsed, dict):
+        raise SystemExit("--tito-chat-template-kwargs must be a JSON object")
+    return parsed
+
+
 def _serve(args: argparse.Namespace) -> int:
     urls: list[str] = args.backend_url or []
     config = TITOGatewayConfig.from_cli_values(
@@ -120,6 +143,7 @@ def _serve(args: argparse.Namespace) -> int:
         chat_template_path=args.chat_template_path,
         tito_model=args.tito_model,
         tito_allowed_append_roles=args.tito_allowed_append_roles,
+        tito_chat_template_kwargs=_parse_template_kwargs(args.tito_chat_template_kwargs),
         session_server_ip=args.session_server_ip,
         session_server_port=args.session_server_port,
         router_timeout=args.router_timeout,
