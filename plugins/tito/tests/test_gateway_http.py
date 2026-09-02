@@ -255,6 +255,21 @@ async def test_tool_call_completion_with_null_content_is_accepted(gateway):
 
 
 @pytest.mark.asyncio
+async def test_reasoning_only_truncated_turn_is_accepted_and_recorded(gateway):
+    """A thinking model cut off by max_tokens inside <think> returns
+    reasoning_content with content:null and no tool_calls (vLLM derender,
+    finish_reason=length). That is a real generation the trajectory must keep."""
+    client, replica, _ = gateway
+    replica.message = {"role": "assistant", "content": None, "reasoning_content": "still thinking"}
+    sid = (await client.post("/sessions")).json()["session_id"]
+    r = await client.post(f"/sessions/{sid}/v1/chat/completions", json=_CHAT)
+    assert r.status_code == 200
+    assert r.json()["choices"][0]["message"]["reasoning_content"] == "still thinking"
+    got = (await client.get(f"/sessions/{sid}")).json()
+    assert len(got["records"]) == 1
+
+
+@pytest.mark.asyncio
 async def test_content_none_without_tool_calls_is_still_502(gateway):
     client, replica, _ = gateway
     replica.message = {"role": "assistant", "content": None}

@@ -107,11 +107,21 @@ def _extract_assistant_message(choice: dict) -> dict:
     assistant_message = choice.get("message")
     if not isinstance(assistant_message, dict):
         raise UpstreamResponseError("assistant message missing")
-    if assistant_message.get("content") is None and not assistant_message.get("tool_calls"):
+    has_reasoning = any(
+        isinstance(assistant_message.get(key), str) and assistant_message.get(key)
+        for key in ("reasoning_content", "reasoning", "reasoning_text")
+    )
+    if (
+        assistant_message.get("content") is None
+        and not assistant_message.get("tool_calls")
+        and not has_reasoning
+    ):
         # Tool-call-only turns routinely carry content:null (the parser
-        # consumed all generated text) — only a turn with NEITHER content
-        # NOR tool_calls is malformed.
-        raise UpstreamResponseError("assistant message has neither content nor tool_calls")
+        # consumed all generated text), and a reasoning model that hits
+        # max_tokens inside its <think> block yields reasoning with no visible
+        # content (finish_reason=length) — both are real, recordable turns.
+        # Only a turn with NONE of content / tool_calls / reasoning is malformed.
+        raise UpstreamResponseError("assistant message has neither content, tool_calls, nor reasoning")
     return assistant_message
 
 
