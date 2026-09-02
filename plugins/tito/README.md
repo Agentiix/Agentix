@@ -47,6 +47,14 @@ Families (`--tito-model`):
   mid-conversation is rejected; `user` appends are safe on Qwen3.8 (whose
   template preserves earlier thinking by default) but clear earlier-turn
   reasoning on Qwen3.5, so keep `--tito-allowed-append-roles tool` there.
+  Three agent-facing tolerances learned from Pi 0.84.1 driving Qwen3.8: an
+  assistant turn that spent its whole `max_tokens` inside `<think>` (reasoning,
+  no content, no tool calls) is a legal turn, not a malformed upstream reply;
+  echoed `tool_calls` are compared by their **parsed** arguments (Pi
+  re-serializes JSON with different spacing than vLLM); and a history that
+  echoes reasoning under `reasoning` (vLLM's key) is aliased to
+  `reasoning_content` before rendering so earlier-turn thinking survives the
+  from-scratch render audit.
 
 ## Streaming clients
 
@@ -107,6 +115,20 @@ template variables as a JSON object. `--backend-kind` selects the backend token 
 (`sglang` default, or `vllm`). `--backend-url` may be omitted to auto-discover
 a local backend (see `agentix.tito.discovery`). Run `agentix-tito serve -h`
 for the full list.
+
+### Context window clamp (`--tito-context-window TOKENS`, vllm)
+
+vLLM rejects any request with `prompt + max_tokens > max_model_len` — already
+in `/v1/chat/completions/render`, and it counts one token more than the
+session's exact prompt ids for Qwen3-family templates. For an agent whose
+profile asks for a large per-turn budget (Pi with `maxTokens: 131072`) that
+turns into a hard wall on trajectory length at `max_model_len - max_tokens`.
+With the window configured the gateway caps the chat request's `max_tokens`
+(and the rendered `sampling_params.max_tokens`) at
+`context_window - len(prompt_ids) - 16` before forwarding, so the per-turn
+budget shrinks as the trajectory grows instead of the turn failing with 400.
+A prompt that already fills the window is left to the backend's own verdict.
+Unset = forward `max_tokens` verbatim (previous behaviour).
 
 ## Per-turn record persistence — `tito.record.v1` (normative)
 
