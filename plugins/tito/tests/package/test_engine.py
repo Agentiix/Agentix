@@ -74,6 +74,23 @@ def test_message_matches_collapses_falsy_sentinels():
     assert not message_matches({"role": "u", "content": "x"}, {"role": "t", "content": "x"})
 
 
+def test_render_aliases_reasoning_key_to_reasoning_content():
+    """Pi echoes earlier assistant turns with `reasoning` (vLLM's key); Qwen
+    templates read `reasoning_content`. Rendering must treat them the same."""
+    from agentix.tito.engine.render import normalize_tool_arguments
+
+    via_reasoning = normalize_tool_arguments(
+        [{"role": "assistant", "content": "ok", "reasoning": "because"}], "dict"
+    )[0]
+    assert via_reasoning["reasoning_content"] == "because"
+    kept = normalize_tool_arguments(
+        [{"role": "assistant", "content": "ok", "reasoning": "x", "reasoning_content": "keep me"}], "dict"
+    )[0]
+    assert kept["reasoning_content"] == "keep me"
+    untouched = normalize_tool_arguments([{"role": "user", "content": "hi", "reasoning": "n/a"}], "dict")[0]
+    assert "reasoning_content" not in untouched
+
+
 def test_message_matches_compares_tool_call_arguments_by_meaning():
     """vLLM stores arguments as json.dumps (": " spacing); Pi echoes them back
     via JSON.stringify (no spaces). Same call, different bytes, must match —

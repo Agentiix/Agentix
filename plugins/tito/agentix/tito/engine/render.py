@@ -37,6 +37,18 @@ def normalize_tool_arguments(messages: list[dict], format: Literal["dict", "json
         if msg.get("role") == "assistant":
             if msg.get("content") is None:
                 msg["content"] = ""
+            # Clients echo reasoning under the key their provider face used:
+            # vLLM emits `reasoning`, Pi echoes `reasoning` back, while Qwen
+            # templates only read `reasoning_content`. Without this alias a
+            # from-scratch render drops every earlier turn's thinking
+            # (empty <think>), diverging from the prefix the model actually
+            # generated on.
+            if not msg.get("reasoning_content"):
+                for key in ("reasoning", "reasoning_text"):
+                    value = msg.get(key)
+                    if isinstance(value, str) and value:
+                        msg["reasoning_content"] = value
+                        break
             if isinstance(msg.get("tool_calls"), list):
                 for item in msg["tool_calls"]:
                     func = item.get("function")
