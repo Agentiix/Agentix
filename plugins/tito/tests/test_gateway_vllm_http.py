@@ -631,16 +631,22 @@ async def test_vllm_max_tokens_is_clamped_to_the_context_window(tok, monkeypatch
     assert generate_body["sampling_params"]["max_tokens"] == 32
     prompt_len = len(generate_body["token_ids"])
 
-    # Window with only 5 tokens of room after that prompt: max_tokens -> 5.
-    client, replica = make(prompt_len + 5)
+    # Window with only 5 tokens of room after that prompt (plus the render
+    # off-by-one margin): max_tokens -> 5, already in the chat request render
+    # sees (vLLM validates there too) and in the rendered sampling params.
+    from agentix.tito.engine.upstream import VllmUpstream
+
+    client, replica = make(prompt_len + 5 + VllmUpstream.CONTEXT_MARGIN)
     sid = (await client.post("/sessions")).json()["session_id"]
-    assert (await client.post(f"/sessions/{sid}/v1/chat/completions", json=_CHAT)).status_code == 200
+    r = await client.post(f"/sessions/{sid}/v1/chat/completions", json={**_CHAT, "max_tokens": 4096})
+    assert r.status_code == 200
+    assert replica.calls["render"][-1]["max_tokens"] == 5
     generate_body = replica.calls["generate"][-1]
     assert len(generate_body["token_ids"]) == prompt_len
     assert generate_body["sampling_params"]["max_tokens"] == 5
 
     # A prompt that already fills the window is left to the backend's verdict.
-    client, replica = make(prompt_len)
+    client, replica = make(prompt_len + VllmUpstream.CONTEXT_MARGIN)
     sid = (await client.post("/sessions")).json()["session_id"]
     assert (await client.post(f"/sessions/{sid}/v1/chat/completions", json=_CHAT)).status_code == 200
     assert replica.calls["generate"][-1]["sampling_params"]["max_tokens"] == 32

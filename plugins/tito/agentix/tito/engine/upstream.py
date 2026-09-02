@@ -216,6 +216,12 @@ class VllmUpstream:
     release with the derender endpoints)."""
 
     kind = "vllm"
+    # vLLM's render re-tokenizes the message history and, for the Qwen3 family,
+    # counts one token more than the session's exact prompt ids (the
+    # `<|im_end|>\n` fixup); its `prompt + max_tokens <= max_model_len` check
+    # runs against THAT count. Leave a little room so an exact fit is not
+    # rejected by an off-by-one.
+    CONTEXT_MARGIN = 16
 
     def __init__(self, context_window: int | None = None) -> None:
         self.context_window = context_window
@@ -223,24 +229,39 @@ class VllmUpstream:
     def validate_request(self, request_body: dict) -> None:
         _require_model(request_body)
 
-    def clamp_max_tokens(self, generate_request: dict, prompt_len: int) -> int | None:
-        """Fit ``sampling_params.max_tokens`` into the backend's context window.
-
-        vLLM rejects ``prompt + max_tokens > max_model_len`` outright, which
-        turns a generous per-turn budget into a hard wall on trajectory length.
-        With ``context_window`` known, cap the budget at the remaining room and
-        return the effective value (None when nothing was changed). A prompt
-        that already fills the window is left alone: the backend's own
-        rejection is the right verdict there.
-        """
+    def _room(self, prompt_len: int) -> int | None:
         if self.context_window is None:
             return None
+        room = self.context_window - prompt_len - self.CONTEXT_MARGIN
+        return room if room > 0 else None
+
+    def clamp_chat_max_tokens(self, request_body: dict, prompt_len: int) -> int | None:
+        """Fit the chat request's ``max_tokens`` into the backend's context window.
+
+        vLLM validates ``prompt + max_tokens <= max_model_len`` already in
+        ``/v1/chat/completions/render`` (and again in generate), which turns a
+        generous per-turn budget into a hard wall on trajectory length. The
+        gateway knows the session's exact prompt length before render, so cap
+        the budget at the remaining room here. Returns the effective value
+        (None when nothing changed). A prompt that already fills the window is
+        left alone: the backend's own rejection is the right verdict there.
+        """
+        room = self._room(prompt_len)
+        requested = request_body.get("max_tokens")
+        if room is None or not isinstance(requested, int) or requested <= room:
+            return None
+        request_body["max_tokens"] = room
+        return room
+
+    def clamp_max_tokens(self, generate_request: dict, prompt_len: int) -> int | None:
+        """Same fit on the rendered ``GenerateRequest.sampling_params`` (render
+        may have resolved a server-side default larger than the room)."""
+        room = self._room(prompt_len)
         params = generate_request.get("sampling_params")
-        if not isinstance(params, dict):
+        if room is None or not isinstance(params, dict):
             return None
         requested = params.get("max_tokens")
-        room = self.context_window - prompt_len
-        if not isinstance(requested, int) or room <= 0 or requested <= room:
+        if not isinstance(requested, int) or requested <= room:
             return None
         params["max_tokens"] = room
         return room
@@ -262,6 +283,7 @@ class VllmUpstream:
         # derender only accepts a complete (non-streamed) GenerateResponse.
         request_body["stream"] = False
         request_body.pop("stream_options", None)
+        self.clamp_chat_max_tokens(request_body, len(prompt_token_ids))
 
         render_result = await backend.do_proxy(
             request, "v1/chat/completions/render", body=_encode(request_body)
