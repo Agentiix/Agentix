@@ -8,6 +8,7 @@ each turn extends the stored history without rewriting it.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 # Keys a chat template actually reads. Extra client-injected keys
@@ -37,8 +38,48 @@ def _reasoning_value(message: dict[str, Any]) -> Any:
     return None
 
 
+def _canonical_tool_calls(value: Any) -> Any:
+    """Compare tool calls by meaning, not by serialization.
+
+    The backend's parser emits ``function.arguments`` as one JSON string (vLLM:
+    ``json.dumps`` with ``": "`` spacing); an OpenAI-style client echoes it back
+    re-serialized (Pi/JS ``JSON.stringify``: no spaces). Both render to the same
+    tokens once the template parses the arguments (``normalize_tool_arguments``
+    does exactly that before rendering), so they must compare equal here or an
+    honest second turn is mistaken for a history rewrite. Unparseable strings
+    are compared verbatim.
+    """
+    normalized = normalize_value(value)
+    if not isinstance(normalized, list):
+        return normalized
+    result = []
+    for call in normalized:
+        if not isinstance(call, dict):
+            result.append(call)
+            continue
+        function = call.get("function") if isinstance(call.get("function"), dict) else {}
+        arguments = function.get("arguments", call.get("arguments"))
+        if isinstance(arguments, str):
+            try:
+                arguments = json.loads(arguments)
+            except ValueError:
+                pass
+        result.append(
+            {
+                "id": call.get("id"),
+                "name": function.get("name", call.get("name")),
+                "arguments": arguments,
+            }
+        )
+    return result
+
+
 def message_matches(stored: dict[str, Any], new: dict[str, Any]) -> bool:
     for key in TEMPLATE_RELEVANT_KEYS:
+        if key == "tool_calls":
+            if _canonical_tool_calls(stored.get(key)) != _canonical_tool_calls(new.get(key)):
+                return False
+            continue
         if normalize_value(stored.get(key)) != normalize_value(new.get(key)):
             return False
     # Reasoning is model-generated and routinely dropped on echo (openai-python

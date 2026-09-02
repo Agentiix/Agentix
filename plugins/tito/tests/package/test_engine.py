@@ -74,6 +74,35 @@ def test_message_matches_collapses_falsy_sentinels():
     assert not message_matches({"role": "u", "content": "x"}, {"role": "t", "content": "x"})
 
 
+def test_message_matches_compares_tool_call_arguments_by_meaning():
+    """vLLM stores arguments as json.dumps (": " spacing); Pi echoes them back
+    via JSON.stringify (no spaces). Same call, different bytes, must match —
+    otherwise the second turn of every tool-using rollout is a false rollback."""
+    stored = {"role": "assistant", "content": "", "tool_calls": [{
+        "id": "c1", "type": "function",
+        "function": {"name": "bash", "arguments": "{\"command\": \"ls -la && cat reference.py\"}"},
+    }]}
+    echoed = {"role": "assistant", "content": None, "tool_calls": [{
+        "id": "c1", "type": "function",
+        "function": {"name": "bash", "arguments": "{\"command\":\"ls -la && cat reference.py\"}"},
+    }]}
+    assert message_matches(stored, echoed)
+    # A genuinely different call is still a mismatch.
+    other = {"role": "assistant", "content": None, "tool_calls": [{
+        "id": "c1", "type": "function",
+        "function": {"name": "bash", "arguments": "{\"command\":\"rm -rf /\"}"},
+    }]}
+    assert not message_matches(stored, other)
+    # Different id or name also mismatch; unparseable strings compare verbatim.
+    assert not message_matches(stored, {**echoed, "tool_calls": [{**echoed["tool_calls"][0], "id": "c2"}]})
+    def raw(arguments):
+        call = {"id": "c1", "function": {"name": "f", "arguments": arguments}}
+        return {"role": "assistant", "content": "", "tool_calls": [call]}
+
+    raw_a, raw_b = raw("not json"), raw("not  json")
+    assert not message_matches(raw_a, raw_b)
+
+
 def test_message_matches_reasoning_tolerates_absence_and_key_dialect():
     """Reasoning is model-generated and routinely dropped on echo
     (openai-python keeps only the standard fields), and lives under
