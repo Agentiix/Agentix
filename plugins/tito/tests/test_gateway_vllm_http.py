@@ -54,6 +54,7 @@ def _args():
         tito_model="default",
         session_server_instance_id=None,
         router_timeout=5.0,
+        tito_context_window=None,
     )
 
 
@@ -602,3 +603,44 @@ async def test_vllm_tool_call_record_carries_rewritten_finish_reason(tok, monkey
     (rec,) = [line for line in lines if line["schema_version"] == "tito.record.v1"]
     assert rec["finish_reason"] == "tool_calls"
     assert rec["assistant_message"]["tool_calls"][0]["id"] == "call_1"
+
+
+@pytest.mark.asyncio
+async def test_vllm_max_tokens_is_clamped_to_the_context_window(tok, monkeypatch):
+    """A per-turn budget larger than the room left after the session's exact
+    prompt ids is cut to that room; a budget that fits is forwarded verbatim.
+    Without the clamp vLLM rejects `prompt + max_tokens > max_model_len`, which
+    caps trajectory length at `max_model_len - max_tokens`."""
+    monkeypatch.setattr("agentix.tito.engine.session_app.load_tokenizer", lambda *a, **k: tok)
+
+    def make(window):
+        args = _args()
+        args.tito_context_window = window
+        srv = SessionServer(args, BackendPool([A]))
+        replica = _VllmReplica()
+        srv._backend.client = httpx.AsyncClient(transport=httpx.MockTransport(replica.handler), timeout=5.0)
+        client = httpx.AsyncClient(transport=httpx.ASGITransport(app=srv.app), base_url="http://gw", timeout=5.0)
+        return client, replica
+
+    # Roomy window: the replica's render resolves max_tokens to 32 and it must
+    # pass through untouched. Also learn the gateway's exact prompt length.
+    client, replica = make(10_000)
+    sid = (await client.post("/sessions")).json()["session_id"]
+    assert (await client.post(f"/sessions/{sid}/v1/chat/completions", json=_CHAT)).status_code == 200
+    generate_body = replica.calls["generate"][-1]
+    assert generate_body["sampling_params"]["max_tokens"] == 32
+    prompt_len = len(generate_body["token_ids"])
+
+    # Window with only 5 tokens of room after that prompt: max_tokens -> 5.
+    client, replica = make(prompt_len + 5)
+    sid = (await client.post("/sessions")).json()["session_id"]
+    assert (await client.post(f"/sessions/{sid}/v1/chat/completions", json=_CHAT)).status_code == 200
+    generate_body = replica.calls["generate"][-1]
+    assert len(generate_body["token_ids"]) == prompt_len
+    assert generate_body["sampling_params"]["max_tokens"] == 5
+
+    # A prompt that already fills the window is left to the backend's verdict.
+    client, replica = make(prompt_len)
+    sid = (await client.post("/sessions")).json()["session_id"]
+    assert (await client.post(f"/sessions/{sid}/v1/chat/completions", json=_CHAT)).status_code == 200
+    assert replica.calls["generate"][-1]["sampling_params"]["max_tokens"] == 32

@@ -105,6 +105,14 @@ def _add_serve_arguments(parser: argparse.ArgumentParser) -> None:
         help="LRU-evict sessions beyond this count (same flush-first, never-in-flight rules). Unset = unbounded.",
     )
     parser.add_argument(
+        "--tito-context-window",
+        type=int,
+        default=None,
+        metavar="TOKENS",
+        help="Backend context window (vLLM max_model_len). vllm turns clamp max_tokens to what fits after the "
+             "session's prompt ids instead of letting the backend reject the request. Unset = forward verbatim.",
+    )
+    parser.add_argument(
         "--backend-probe-candidate",
         action="append",
         default=None,
@@ -152,6 +160,7 @@ def _serve(args: argparse.Namespace) -> int:
         record_dir=args.record_dir,
         session_ttl_seconds=args.session_ttl_seconds,
         max_sessions=args.max_sessions,
+        tito_context_window=args.tito_context_window,
     )
     TITOGateway(config).run()
     return 0

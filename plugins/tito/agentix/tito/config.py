@@ -49,10 +49,18 @@ class TITOGatewayConfig:
     # touches a session with in-flight requests.
     session_ttl_seconds: float | None = None
     max_sessions: int | None = None
+    # Backend context window in tokens (vLLM `max_model_len`). When set, the
+    # vllm turn clamps the chat request's `max_tokens` to what fits after the
+    # session's exact prompt ids, so an agent profile with a large per-turn
+    # budget never trips the backend's "prompt + max_tokens > max_model_len"
+    # rejection as the trajectory grows. Unset = forward max_tokens verbatim.
+    tito_context_window: int | None = None
 
     def __post_init__(self) -> None:
         if not self.hf_checkpoint:
             raise ValueError("hf_checkpoint is required for TITO token tracking")
+        if self.tito_context_window is not None and self.tito_context_window <= 0:
+            raise ValueError("tito_context_window must be a positive token count")
 
         normalized_roles = tuple(dict.fromkeys(role.lower() for role in self.tito_allowed_append_roles))
         invalid = sorted(set(normalized_roles) - _VALID_APPEND_ROLES)
@@ -107,6 +115,7 @@ class TITOGatewayConfig:
         record_dir: str | None = None,
         session_ttl_seconds: float | None = None,
         max_sessions: int | None = None,
+        tito_context_window: int | None = None,
     ) -> TITOGatewayConfig:
         return cls(
             hf_checkpoint=hf_checkpoint,
@@ -127,6 +136,7 @@ class TITOGatewayConfig:
             record_dir=record_dir,
             session_ttl_seconds=session_ttl_seconds,
             max_sessions=max_sessions,
+            tito_context_window=tito_context_window,
         )
 
     def as_session_args(self):
@@ -147,4 +157,5 @@ class TITOGatewayConfig:
             record_dir=self.record_dir,
             session_ttl_seconds=self.session_ttl_seconds,
             max_sessions=self.max_sessions,
+            tito_context_window=self.tito_context_window,
         )

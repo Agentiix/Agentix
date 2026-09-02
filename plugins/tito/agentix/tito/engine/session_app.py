@@ -72,7 +72,10 @@ def setup_session_routes(app: FastAPI, backend: Backend, args: Any) -> None:
     # capture must be complete and closed however the process exits cleanly.
     app.router.on_shutdown.append(registry.close)
 
-    adapter = get_upstream(getattr(args, "backend_kind", "sglang"))
+    adapter = get_upstream(
+        getattr(args, "backend_kind", "sglang"),
+        context_window=getattr(args, "tito_context_window", None),
+    )
     backend_kind = str(getattr(args, "backend_kind", "sglang") or "sglang")
 
     instance_id = getattr(args, "session_server_instance_id", None)

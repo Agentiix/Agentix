@@ -217,8 +217,33 @@ class VllmUpstream:
 
     kind = "vllm"
 
+    def __init__(self, context_window: int | None = None) -> None:
+        self.context_window = context_window
+
     def validate_request(self, request_body: dict) -> None:
         _require_model(request_body)
+
+    def clamp_max_tokens(self, generate_request: dict, prompt_len: int) -> int | None:
+        """Fit ``sampling_params.max_tokens`` into the backend's context window.
+
+        vLLM rejects ``prompt + max_tokens > max_model_len`` outright, which
+        turns a generous per-turn budget into a hard wall on trajectory length.
+        With ``context_window`` known, cap the budget at the remaining room and
+        return the effective value (None when nothing was changed). A prompt
+        that already fills the window is left alone: the backend's own
+        rejection is the right verdict there.
+        """
+        if self.context_window is None:
+            return None
+        params = generate_request.get("sampling_params")
+        if not isinstance(params, dict):
+            return None
+        requested = params.get("max_tokens")
+        room = self.context_window - prompt_len
+        if not isinstance(requested, int) or room <= 0 or requested <= room:
+            return None
+        params["max_tokens"] = room
+        return room
 
     async def chat_turn(
         self, backend: Backend, request: Request, request_body: dict, prompt_token_ids: list[int]
@@ -256,6 +281,7 @@ class VllmUpstream:
         # render copies `stream` from the chat request it saw — re-force.
         generate_request["stream"] = False
         generate_request.pop("stream_options", None)
+        self.clamp_max_tokens(generate_request, len(prompt_token_ids))
 
         generate_result = await backend.do_proxy(
             request, "inference/v1/generate", body=_encode(generate_request)
@@ -338,9 +364,9 @@ def _harvest_generate_tokens(generate_response: dict) -> tuple[list[int], list[f
     return list(token_ids), completion_logprobs
 
 
-def get_upstream(kind: str) -> UpstreamAdapter:
+def get_upstream(kind: str, *, context_window: int | None = None) -> UpstreamAdapter:
     if kind == "sglang":
         return SglangUpstream()
     if kind == "vllm":
-        return VllmUpstream()
+        return VllmUpstream(context_window=context_window)
     raise ValueError(f"unsupported backend_kind {kind!r}; supported: {list(BACKEND_KINDS)}")
