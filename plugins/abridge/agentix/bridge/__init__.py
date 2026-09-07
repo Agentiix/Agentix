@@ -33,6 +33,17 @@ stays shape-blind.
 
 from __future__ import annotations
 
+from .capture import (
+    RECORD_SCHEMA_VERSION,
+    SESSION_META_SCHEMA_VERSION,
+    CaptureLevel,
+    PrefixRelation,
+    PrefixTracker,
+    RequestFacts,
+    ResponseFacts,
+    request_facts,
+    response_facts,
+)
 from .forward import Forward, SessionForward
 from .proxy import (
     NAMESPACE,
@@ -52,21 +63,30 @@ from .sidecar import Command, Sidecar, SidecarError
 __version__ = "0.5.0"
 
 __all__ = [
+    "NAMESPACE",
+    "RECORD_SCHEMA_VERSION",
+    "SESSION_META_SCHEMA_VERSION",
     "AbridgeError",
+    "CaptureLevel",
     "Client",
     "ClientResponse",
     "Command",
     "DynamicRoutes",
     "Forward",
     "Handler",
-    "NAMESPACE",
+    "PrefixRelation",
+    "PrefixTracker",
     "Proxy",
     "Recorder",
     "Request",
+    "RequestFacts",
+    "ResponseFacts",
     "SessionForward",
     "Sidecar",
     "SidecarError",
     "TunnelHandle",
     "__version__",
     "on",
+    "request_facts",
+    "response_facts",
 ]

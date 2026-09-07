@@ -32,6 +32,7 @@ from .errors import (
 from .pretokenize import get_tito_tokenizer
 from .processing import load_tokenizer
 from .record import build_turn_record, sampling_from_request
+from .sse import build_sse_response
 from .trajectory import GetSessionResponse, LinearTrajectory, SessionRecord, SessionRegistry
 from .upstream import Backend, get_upstream
 
@@ -56,6 +57,7 @@ def build_registry(args: Any) -> SessionRegistry | None:
         tokenizer,
         tokenizer_type=getattr(args, "tito_model", "default"),
         allowed_append_roles=tuple(roles),
+        chat_template_kwargs=dict(getattr(args, "tito_chat_template_kwargs", None) or {}),
     )
     return SessionRegistry(args, tokenizer, tito_tokenizer=tito_tokenizer)
 
@@ -70,7 +72,12 @@ def setup_session_routes(app: FastAPI, backend: Backend, args: Any) -> None:
     # capture must be complete and closed however the process exits cleanly.
     app.router.on_shutdown.append(registry.close)
 
-    adapter = get_upstream(getattr(args, "backend_kind", "sglang"))
+    adapter = get_upstream(
+        getattr(args, "backend_kind", "sglang"),
+        context_window=getattr(args, "tito_context_window", None),
+        eos_token_id=getattr(registry.tokenizer, "eos_token_id", None),
+        eos_token=getattr(registry.tokenizer, "eos_token", None),
+    )
     backend_kind = str(getattr(args, "backend_kind", "sglang") or "sglang")
 
     instance_id = getattr(args, "session_server_instance_id", None)
@@ -157,6 +164,11 @@ def setup_session_routes(app: FastAPI, backend: Backend, args: Any) -> None:
         # Adapter preconditions raise HERE, before the lock: phase 1 can
         # commit a rollback, and a rejected request must leave no side effects.
         adapter.validate_request(request_body)
+        # The adapter forces stream=false upstream (the token harvest needs the
+        # whole JSON body). Remember what the CLIENT asked for: an agent that
+        # only speaks SSE (Pi, the OpenAI SDK with stream=True) must get its
+        # completed turn back as a well-formed event stream, not a JSON body.
+        client_wants_stream = request_body.get("stream") is True
 
         # Phase 1: prepare the pretokenized prompt ids (lock held briefly).
         async with session.lock:
@@ -176,6 +188,8 @@ def setup_session_routes(app: FastAPI, backend: Backend, args: Any) -> None:
         # break token accumulation) and harvests the exact completion ids.
         turn = await adapter.chat_turn(backend, request, request_body, prompt_token_ids)
         if turn.harvest is None:
+            # Upstream non-200: pass the error body through as-is (an SSE
+            # client treats a non-2xx as an error regardless of framing).
             return backend.build_proxy_response(turn.proxy_result)
         harvest = turn.harvest
 
@@ -241,6 +255,8 @@ def setup_session_routes(app: FastAPI, backend: Backend, args: Any) -> None:
                     )
                 except Exception:
                     logger.exception("tito record: failed to capture turn for session %s", session_id)
+        if client_wants_stream:
+            return build_sse_response(turn.proxy_result["response_body"])
         return backend.build_proxy_response(turn.proxy_result)
 
     @app.api_route("/sessions/{session_id}/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])

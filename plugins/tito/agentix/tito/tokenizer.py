@@ -14,6 +14,7 @@ class TITOTokenizerType(StrEnum):
 
     DEFAULT = "default"
     QWEN3 = "qwen3"
+    QWEN3_5 = "qwen3_5"
 
 
 def get_tito_tokenizer(
@@ -21,9 +22,12 @@ def get_tito_tokenizer(
     tokenizer_type: TITOTokenizerType | str = TITOTokenizerType.DEFAULT,
     *,
     allowed_append_roles: tuple[str, ...] | list[str] | None = None,
+    chat_template_kwargs: dict[str, Any] | None = None,
     **_ignored: Any,
 ) -> Any:
-    """Build a TITO tokenizer for *tokenizer* (`"qwen3"` or `"default"`)."""
+    """Build a TITO tokenizer for *tokenizer* (`"qwen3"`, `"qwen3_5"`, or `"default"`)."""
     t = tokenizer_type.value if isinstance(tokenizer_type, TITOTokenizerType) else str(tokenizer_type)
     roles = tuple(allowed_append_roles) if allowed_append_roles else ("tool",)
-    return _engine_get_tito_tokenizer(tokenizer, t, allowed_append_roles=roles)
+    return _engine_get_tito_tokenizer(
+        tokenizer, t, allowed_append_roles=roles, chat_template_kwargs=chat_template_kwargs
+    )

@@ -31,6 +31,43 @@ The algorithm is **model-agnostic** (base `TITOTokenizer`); a model family is a
 fixed chat template plus a tiny boundary fixup — e.g. `Qwen3TITOTokenizer`
 re-inserts the `\n` after `<|im_end|>` that the model omits when it stops.
 
+Families (`--tito-model`):
+
+- `default` — the tokenizer's own template, no fixups.
+- `qwen3` — bundled fixed Qwen3 template (`qwen3_fixed.jinja`) + newline fixup.
+- `qwen3_5` — Qwen3.5 **and Qwen3.8** (`Qwen3_5ForConditionalGeneration`):
+  the tokenizer's own template + the Qwen3 newline fixup + a synthetic
+  context that carries a dummy user turn, because this template family
+  raises `No user query found in messages` otherwise. Tool calls are the
+  `<function=…><parameter=…>` dialect (vLLM `--tool-call-parser qwen3_coder`),
+  reasoning comes from `reasoning_content` only. Pin the template variables
+  that change the prompt with `--tito-chat-template-kwargs`, e.g.
+  `'{"reasoning_effort": "xhigh"}'` for Qwen3.8 (its default is `xhigh`;
+  `medium`/`low` are the other legal values). Appending `system` messages
+  mid-conversation is rejected; `user` appends are safe on Qwen3.8 (whose
+  template preserves earlier thinking by default) but clear earlier-turn
+  reasoning on Qwen3.5, so keep `--tito-allowed-append-roles tool` there.
+  Three agent-facing tolerances learned from Pi 0.84.1 driving Qwen3.8: an
+  assistant turn that spent its whole `max_tokens` inside `<think>` (reasoning,
+  no content, no tool calls) is a legal turn, not a malformed upstream reply;
+  echoed `tool_calls` are compared by their **parsed** arguments (Pi
+  re-serializes JSON with different spacing than vLLM); and a history that
+  echoes reasoning under `reasoning` (vLLM's key) is aliased to
+  `reasoning_content` before rendering so earlier-turn thinking survives the
+  from-scratch render audit.
+
+## Streaming clients
+
+The gateway forces `stream=false` upstream (the token harvest needs the full
+JSON body). A client that sent `stream: true` — Pi's `openai-completions`
+provider, the OpenAI SDK with `stream=True` — gets the **completed turn
+re-framed as Server-Sent Events**: one chunk with the whole assistant delta
+(`role`, `content`, the backend's reasoning field, `tool_calls` with `index`),
+one terminal chunk with `finish_reason` and `usage`, then `data: [DONE]`. The
+response carries `x-tito-stream: reframed`; content is identical to the JSON
+body, only the framing changes. Non-200 upstream answers pass through as
+JSON regardless of framing.
+
 ## Backend kinds
 
 The token dialect is selected by `--backend-kind` (`TITOGatewayConfig.backend_kind`):
@@ -72,11 +109,26 @@ agentix-tito serve \
   --session-server-port 30001
 ```
 
-`--tito-model` selects the tokenizer family (`qwen3`, or `default` for the
-tokenizer's own template). `--backend-kind` selects the backend token dialect
+`--tito-model` selects the tokenizer family (`qwen3`, `qwen3_5`, or `default`
+for the tokenizer's own template); `--tito-chat-template-kwargs` pins extra
+template variables as a JSON object. `--backend-kind` selects the backend token dialect
 (`sglang` default, or `vllm`). `--backend-url` may be omitted to auto-discover
 a local backend (see `agentix.tito.discovery`). Run `agentix-tito serve -h`
 for the full list.
+
+### Context window clamp (`--tito-context-window TOKENS`, vllm)
+
+vLLM rejects any request with `prompt + max_tokens > max_model_len` — already
+in `/v1/chat/completions/render`, and it counts one token more than the
+session's exact prompt ids for Qwen3-family templates. For an agent whose
+profile asks for a large per-turn budget (Pi with `maxTokens: 131072`) that
+turns into a hard wall on trajectory length at `max_model_len - max_tokens`.
+With the window configured the gateway caps the chat request's `max_tokens`
+(and the rendered `sampling_params.max_tokens`) at
+`context_window - len(prompt_ids) - 16` before forwarding, so the per-turn
+budget shrinks as the trajectory grows instead of the turn failing with 400.
+A prompt that already fills the window is left to the backend's own verdict.
+Unset = forward `max_tokens` verbatim (previous behaviour).
 
 ## Per-turn record persistence — `tito.record.v1` (normative)
 

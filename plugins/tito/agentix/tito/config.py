@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
 from .discovery import DEFAULT_BACKEND_PROBE_CANDIDATES
 
@@ -29,6 +30,10 @@ class TITOGatewayConfig:
     chat_template_path: str | None = None
     tito_model: str = "default"
     tito_allowed_append_roles: tuple[str, ...] = ("tool",)
+    # Extra chat-template variables pinned for every render (e.g. Qwen3.8
+    # `reasoning_effort`). Stored as a sorted tuple of (key, value) pairs so the
+    # frozen config stays hashable; see `chat_template_kwargs`.
+    tito_chat_template_kwargs: tuple[tuple[str, Any], ...] = ()
     session_server_ip: str = "127.0.0.1"
     session_server_port: int = 30000
     router_timeout: float = 600.0
@@ -44,16 +49,32 @@ class TITOGatewayConfig:
     # touches a session with in-flight requests.
     session_ttl_seconds: float | None = None
     max_sessions: int | None = None
+    # Backend context window in tokens (vLLM `max_model_len`). When set, the
+    # vllm turn clamps the chat request's `max_tokens` to what fits after the
+    # session's exact prompt ids, so an agent profile with a large per-turn
+    # budget never trips the backend's "prompt + max_tokens > max_model_len"
+    # rejection as the trajectory grows. Unset = forward max_tokens verbatim.
+    tito_context_window: int | None = None
 
     def __post_init__(self) -> None:
         if not self.hf_checkpoint:
             raise ValueError("hf_checkpoint is required for TITO token tracking")
+        if self.tito_context_window is not None and self.tito_context_window <= 0:
+            raise ValueError("tito_context_window must be a positive token count")
 
         normalized_roles = tuple(dict.fromkeys(role.lower() for role in self.tito_allowed_append_roles))
         invalid = sorted(set(normalized_roles) - _VALID_APPEND_ROLES)
         if invalid:
             raise ValueError(f"unsupported tito append roles: {invalid}")
         object.__setattr__(self, "tito_allowed_append_roles", normalized_roles or ("tool",))
+
+        normalized_kwargs = tuple(sorted(dict(self.tito_chat_template_kwargs).items()))
+        for key, _ in normalized_kwargs:
+            if not isinstance(key, str) or not key:
+                raise ValueError("tito_chat_template_kwargs keys must be non-empty strings")
+        if "chat_template" in dict(normalized_kwargs):
+            raise ValueError("tito_chat_template_kwargs must not carry 'chat_template'; use chat_template_path")
+        object.__setattr__(self, "tito_chat_template_kwargs", normalized_kwargs)
 
         if self.routing_policy not in ("sticky", "round_robin"):
             raise ValueError(
@@ -68,6 +89,10 @@ class TITOGatewayConfig:
         if self.max_sessions is not None and self.max_sessions < 1:
             raise ValueError(f"max_sessions must be >= 1; got {self.max_sessions!r}")
 
+    @property
+    def chat_template_kwargs(self) -> dict[str, Any]:
+        return dict(self.tito_chat_template_kwargs)
+
     @classmethod
     def from_cli_values(
         cls,
@@ -78,6 +103,7 @@ class TITOGatewayConfig:
         tito_model: str,
         tito_allowed_append_roles: list[str],
         session_server_ip: str,
+        tito_chat_template_kwargs: dict[str, Any] | None = None,
         session_server_port: int,
         router_timeout: float,
         backend_urls: list[str] | None = None,
@@ -89,6 +115,7 @@ class TITOGatewayConfig:
         record_dir: str | None = None,
         session_ttl_seconds: float | None = None,
         max_sessions: int | None = None,
+        tito_context_window: int | None = None,
     ) -> TITOGatewayConfig:
         return cls(
             hf_checkpoint=hf_checkpoint,
@@ -100,6 +127,7 @@ class TITOGatewayConfig:
             chat_template_path=chat_template_path,
             tito_model=tito_model,
             tito_allowed_append_roles=tuple(tito_allowed_append_roles),
+            tito_chat_template_kwargs=tuple((tito_chat_template_kwargs or {}).items()),
             session_server_ip=session_server_ip,
             session_server_port=session_server_port,
             router_timeout=router_timeout,
@@ -108,6 +136,7 @@ class TITOGatewayConfig:
             record_dir=record_dir,
             session_ttl_seconds=session_ttl_seconds,
             max_sessions=max_sessions,
+            tito_context_window=tito_context_window,
         )
 
     def as_session_args(self):
@@ -120,6 +149,7 @@ class TITOGatewayConfig:
             chat_template_path=self.chat_template_path,
             tito_model=self.tito_model,
             tito_allowed_append_roles=list(self.tito_allowed_append_roles),
+            tito_chat_template_kwargs=self.chat_template_kwargs,
             trust_remote_code=self.trust_remote_code,
             session_server_ip=self.session_server_ip,
             session_server_port=self.session_server_port,
@@ -127,4 +157,5 @@ class TITOGatewayConfig:
             record_dir=self.record_dir,
             session_ttl_seconds=self.session_ttl_seconds,
             max_sessions=self.max_sessions,
+            tito_context_window=self.tito_context_window,
         )

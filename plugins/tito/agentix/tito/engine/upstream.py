@@ -107,11 +107,17 @@ def _extract_assistant_message(choice: dict) -> dict:
     assistant_message = choice.get("message")
     if not isinstance(assistant_message, dict):
         raise UpstreamResponseError("assistant message missing")
-    if assistant_message.get("content") is None and not assistant_message.get("tool_calls"):
+    has_reasoning = any(
+        isinstance(assistant_message.get(key), str) and assistant_message.get(key)
+        for key in ("reasoning_content", "reasoning", "reasoning_text")
+    )
+    if assistant_message.get("content") is None and not assistant_message.get("tool_calls") and not has_reasoning:
         # Tool-call-only turns routinely carry content:null (the parser
-        # consumed all generated text) — only a turn with NEITHER content
-        # NOR tool_calls is malformed.
-        raise UpstreamResponseError("assistant message has neither content nor tool_calls")
+        # consumed all generated text), and a reasoning model that hits
+        # max_tokens inside its <think> block yields reasoning with no visible
+        # content (finish_reason=length) — both are real, recordable turns.
+        # Only a turn with NONE of content / tool_calls / reasoning is malformed.
+        raise UpstreamResponseError("assistant message has neither content, tool_calls, nor reasoning")
     return assistant_message
 
 
@@ -128,9 +134,9 @@ class SglangUpstream:
         self, backend: Backend, request: Request, request_body: dict, prompt_token_ids: list[int]
     ) -> ChatTurn:
         # Hardcoded so an agent override can't break token accumulation:
-        request_body["logprobs"] = True          # -> meta_info.output_token_logprobs
-        request_body["return_meta_info"] = True   # -> choice.meta_info
-        request_body["no_stop_trim"] = False       # stop-token text trimmed from content
+        request_body["logprobs"] = True  # -> meta_info.output_token_logprobs
+        request_body["return_meta_info"] = True  # -> choice.meta_info
+        request_body["no_stop_trim"] = False  # stop-token text trimmed from content
         # The TITO flow needs the complete JSON completion (logprobs +
         # meta_info); an SSE stream would be unparseable below. Force
         # non-streaming — a stream:true agent gets the full JSON body back.
@@ -206,9 +212,81 @@ class VllmUpstream:
     release with the derender endpoints)."""
 
     kind = "vllm"
+    # vLLM's render re-tokenizes the message history and, for the Qwen3 family,
+    # counts one token more than the session's exact prompt ids (the
+    # `<|im_end|>\n` fixup); its `prompt + max_tokens <= max_model_len` check
+    # runs against THAT count. Leave a little room so an exact fit is not
+    # rejected by an off-by-one.
+    CONTEXT_MARGIN = 16
+
+    def __init__(
+        self, context_window: int | None = None, eos_token_id: int | None = None, eos_token: str | None = None
+    ) -> None:
+        self.context_window = context_window
+        self.eos_token_id = eos_token_id
+        self.eos_token = eos_token
+
+    def normalize_terminal_eos(self, response: dict, token_ids: list[int]) -> bool:
+        choice = _first_choice(response)
+        if (
+            not self.eos_token
+            or self.eos_token_id is None
+            or not token_ids
+            or token_ids[-1] != self.eos_token_id
+            or choice.get("finish_reason") != "stop"
+        ):
+            return False
+        message = choice.get("message")
+        if not isinstance(message, dict):
+            return False
+        for key in ("content", "reasoning", "reasoning_content"):
+            text = message.get(key)
+            if isinstance(text, str) and text:
+                if text.endswith(self.eos_token):
+                    message[key] = text[: -len(self.eos_token)]
+                    return True
+                return False
+        return False
 
     def validate_request(self, request_body: dict) -> None:
         _require_model(request_body)
+
+    def _room(self, prompt_len: int) -> int | None:
+        if self.context_window is None:
+            return None
+        room = self.context_window - prompt_len - self.CONTEXT_MARGIN
+        return room if room > 0 else None
+
+    def clamp_chat_max_tokens(self, request_body: dict, prompt_len: int) -> int | None:
+        """Fit the chat request's ``max_tokens`` into the backend's context window.
+
+        vLLM validates ``prompt + max_tokens <= max_model_len`` already in
+        ``/v1/chat/completions/render`` (and again in generate), which turns a
+        generous per-turn budget into a hard wall on trajectory length. The
+        gateway knows the session's exact prompt length before render, so cap
+        the budget at the remaining room here. Returns the effective value
+        (None when nothing changed). A prompt that already fills the window is
+        left alone: the backend's own rejection is the right verdict there.
+        """
+        room = self._room(prompt_len)
+        requested = request_body.get("max_tokens")
+        if room is None or not isinstance(requested, int) or requested <= room:
+            return None
+        request_body["max_tokens"] = room
+        return room
+
+    def clamp_max_tokens(self, generate_request: dict, prompt_len: int) -> int | None:
+        """Same fit on the rendered ``GenerateRequest.sampling_params`` (render
+        may have resolved a server-side default larger than the room)."""
+        room = self._room(prompt_len)
+        params = generate_request.get("sampling_params")
+        if room is None or not isinstance(params, dict):
+            return None
+        requested = params.get("max_tokens")
+        if not isinstance(requested, int) or requested <= room:
+            return None
+        params["max_tokens"] = room
+        return room
 
     async def chat_turn(
         self, backend: Backend, request: Request, request_body: dict, prompt_token_ids: list[int]
@@ -227,10 +305,9 @@ class VllmUpstream:
         # derender only accepts a complete (non-streamed) GenerateResponse.
         request_body["stream"] = False
         request_body.pop("stream_options", None)
+        self.clamp_chat_max_tokens(request_body, len(prompt_token_ids))
 
-        render_result = await backend.do_proxy(
-            request, "v1/chat/completions/render", body=_encode(request_body)
-        )
+        render_result = await backend.do_proxy(request, "v1/chat/completions/render", body=_encode(request_body))
         if render_result["status_code"] != 200:
             return ChatTurn(proxy_result=render_result)
         generate_request = _parse_response_object(render_result["response_body"])
@@ -246,10 +323,9 @@ class VllmUpstream:
         # render copies `stream` from the chat request it saw — re-force.
         generate_request["stream"] = False
         generate_request.pop("stream_options", None)
+        self.clamp_max_tokens(generate_request, len(prompt_token_ids))
 
-        generate_result = await backend.do_proxy(
-            request, "inference/v1/generate", body=_encode(generate_request)
-        )
+        generate_result = await backend.do_proxy(request, "inference/v1/generate", body=_encode(generate_request))
         if generate_result["status_code"] != 200:
             return ChatTurn(proxy_result=generate_result)
         generate_response = _parse_response_object(generate_result["response_body"])
@@ -272,6 +348,7 @@ class VllmUpstream:
         if derender_result["status_code"] != 200:
             return ChatTurn(proxy_result=derender_result)
         response = _parse_response_object(derender_result["response_body"])
+        normalized_eos = self.normalize_terminal_eos(response, completion_token_ids)
         assistant_message = _extract_assistant_message(_first_choice(response))
         if assistant_message.get("reasoning") is not None and assistant_message.get("reasoning_content") is None:
             # The engine's templates and the mismatch audit read the
@@ -279,7 +356,7 @@ class VllmUpstream:
             # trajectory copy only — the wire response keeps vLLM's
             # `reasoning` verbatim.
             assistant_message = {**assistant_message, "reasoning_content": assistant_message["reasoning"]}
-        if _rewrite_tool_call_finish_reasons(response):
+        if _rewrite_tool_call_finish_reasons(response) or normalized_eos:
             derender_result = {**derender_result, "response_body": _encode(response)}
 
         return ChatTurn(
@@ -318,9 +395,7 @@ def _harvest_generate_tokens(generate_response: dict) -> tuple[list[int], list[f
         # turn without the per-token cross-check.
         raise UpstreamResponseError("generate response logprobs missing (needs logprobs forced on)")
     if len(content) != len(token_ids):
-        raise UpstreamResponseError(
-            f"len(logprobs.content)={len(content)} != len(token_ids)={len(token_ids)}"
-        )
+        raise UpstreamResponseError(f"len(logprobs.content)={len(content)} != len(token_ids)={len(token_ids)}")
     try:
         completion_logprobs = [float(entry["logprob"]) for entry in content]
     except (TypeError, ValueError, KeyError) as e:
@@ -328,9 +403,11 @@ def _harvest_generate_tokens(generate_response: dict) -> tuple[list[int], list[f
     return list(token_ids), completion_logprobs
 
 
-def get_upstream(kind: str) -> UpstreamAdapter:
+def get_upstream(
+    kind: str, *, context_window: int | None = None, eos_token_id: int | None = None, eos_token: str | None = None
+) -> UpstreamAdapter:
     if kind == "sglang":
         return SglangUpstream()
     if kind == "vllm":
-        return VllmUpstream()
+        return VllmUpstream(context_window=context_window, eos_token_id=eos_token_id, eos_token=eos_token)
     raise ValueError(f"unsupported backend_kind {kind!r}; supported: {list(BACKEND_KINDS)}")

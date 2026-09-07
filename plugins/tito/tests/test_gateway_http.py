@@ -155,21 +155,81 @@ async def test_full_session_flow_over_http(gateway):
     assert r.status_code == 404
 
 
+def _sse_chunks(body: str) -> list:
+    events = [line[len("data: "):] for line in body.split("\n") if line.startswith("data: ")]
+    assert events[-1] == "[DONE]"
+    return [json.loads(e) for e in events[:-1]]
+
+
 @pytest.mark.asyncio
-async def test_stream_request_is_forced_non_streaming(gateway):
+async def test_stream_request_is_forced_non_streaming_upstream_but_served_as_sse(gateway):
     """The TITO flow needs the full JSON completion (logprobs + meta_info), so
-    the gateway must force stream=false upstream and answer 200 with the JSON
-    body — not 500 on an unparseable SSE stream."""
+    the gateway forces stream=false upstream; the CLIENT asked for a stream,
+    so it gets the completed turn re-framed as SSE (Pi and the OpenAI SDK
+    reject a JSON body when they asked for stream=true)."""
     client, replica, _ = gateway
+    replica.message = {
+        "role": "assistant",
+        "content": "ok done",
+        "reasoning_content": "think",
+        "tool_calls": [{
+            "id": "call_1", "type": "function",
+            "function": {"name": "compute", "arguments": "{\"x\": 1}"},
+        }],
+    }
     sid = (await client.post("/sessions")).json()["session_id"]
 
     r = await client.post(
         f"/sessions/{sid}/v1/chat/completions", json={**_CHAT, "stream": True}
     )
     assert r.status_code == 200
-    assert r.json()["choices"][0]["message"]["content"] == "ok done"
+    assert r.headers["content-type"].startswith("text/event-stream")
     _, seen = replica.calls[0]
     assert seen["stream"] is False
+
+    first, last = _sse_chunks(r.text)
+    assert first["object"] == "chat.completion.chunk"
+    assert first["id"] == "c1"
+    delta = first["choices"][0]["delta"]
+    assert delta["role"] == "assistant"
+    assert delta["content"] == "ok done"
+    assert delta["reasoning_content"] == "think"
+    assert delta["tool_calls"] == [{
+        "index": 0, "id": "call_1", "type": "function",
+        "function": {"name": "compute", "arguments": "{\"x\": 1}"},
+    }]
+    assert first["choices"][0]["finish_reason"] is None
+    assert last["choices"][0]["finish_reason"] == "stop"
+    assert last["usage"] == replica.usage
+
+    # The turn was recorded exactly as if the client had not streamed.
+    got = (await client.get(f"/sessions/{sid}")).json()
+    assert len(got["records"]) == 1
+    assert got["metadata"]["accumulated_token_ids"][-2:] == [7, 8]
+
+
+@pytest.mark.asyncio
+async def test_non_streaming_request_still_gets_the_json_body(gateway):
+    client, replica, _ = gateway
+    sid = (await client.post("/sessions")).json()["session_id"]
+    r = await client.post(f"/sessions/{sid}/v1/chat/completions", json=_CHAT)
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("application/json")
+    assert r.json()["choices"][0]["message"]["content"] == "ok done"
+
+
+@pytest.mark.asyncio
+async def test_stream_request_upstream_error_passes_through_as_json(gateway):
+    """A non-200 upstream is not re-framed: SSE clients treat any non-2xx as
+    an error, and the body must stay the backend's verbatim message."""
+    client, replica, _ = gateway
+    replica.message = {"role": "assistant", "content": None}
+    sid = (await client.post("/sessions")).json()["session_id"]
+    r = await client.post(
+        f"/sessions/{sid}/v1/chat/completions", json={**_CHAT, "stream": True}
+    )
+    assert r.status_code == 502
+    assert not r.headers["content-type"].startswith("text/event-stream")
 
 
 @pytest.mark.asyncio
@@ -192,6 +252,21 @@ async def test_tool_call_completion_with_null_content_is_accepted(gateway):
     assert r.json()["choices"][0]["message"]["tool_calls"][0]["id"] == "call_1"
     got = (await client.get(f"/sessions/{sid}")).json()
     assert len(got["records"]) == 1  # the turn was recorded
+
+
+@pytest.mark.asyncio
+async def test_reasoning_only_truncated_turn_is_accepted_and_recorded(gateway):
+    """A thinking model cut off by max_tokens inside <think> returns
+    reasoning_content with content:null and no tool_calls (vLLM derender,
+    finish_reason=length). That is a real generation the trajectory must keep."""
+    client, replica, _ = gateway
+    replica.message = {"role": "assistant", "content": None, "reasoning_content": "still thinking"}
+    sid = (await client.post("/sessions")).json()["session_id"]
+    r = await client.post(f"/sessions/{sid}/v1/chat/completions", json=_CHAT)
+    assert r.status_code == 200
+    assert r.json()["choices"][0]["message"]["reasoning_content"] == "still thinking"
+    got = (await client.get(f"/sessions/{sid}")).json()
+    assert len(got["records"]) == 1
 
 
 @pytest.mark.asyncio
