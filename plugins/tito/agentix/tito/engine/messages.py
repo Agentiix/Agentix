@@ -57,7 +57,9 @@ def _canonical_tool_calls(value: Any) -> Any:
         if not isinstance(call, dict):
             result.append(call)
             continue
-        function = call.get("function") if isinstance(call.get("function"), dict) else {}
+        function = call.get("function")
+        if not isinstance(function, dict):
+            function = {}
         arguments = function.get("arguments", call.get("arguments"))
         if isinstance(arguments, str):
             try:
@@ -122,7 +124,7 @@ def assert_messages_append_only_with_allowed_role(
                 f"Diffs: {diffs}"
             )
 
-    for j, msg in enumerate(new_messages[len(stored_messages):]):
+    for j, msg in enumerate(new_messages[len(stored_messages) :]):
         if msg.get("role") not in allowed_append_roles:
             raise ValueError(
                 f"appended message at index {len(stored_messages) + j} "

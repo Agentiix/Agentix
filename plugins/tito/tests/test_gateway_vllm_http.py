@@ -35,7 +35,10 @@ def tok():
     tk = Tokenizer(models.WordLevel(vocab=vocab, unk_token="<unk>"))
     tk.pre_tokenizer = pre_tokenizers.Whitespace()
     t = PreTrainedTokenizerFast(
-        tokenizer_object=tk, unk_token="<unk>", bos_token="<s>", eos_token="</s>",
+        tokenizer_object=tk,
+        unk_token="<unk>",
+        bos_token="<s>",
+        eos_token="</s>",
         additional_special_tokens=["<|im_start|>", "<|im_end|>"],
     )
     t.chat_template = (
@@ -100,14 +103,17 @@ class _VllmReplica:
         # Deliberately leak `stream: true` + stream_options the way a real
         # render would if the chat request streamed (vLLM copies the flag) —
         # the gateway must overwrite both before calling generate.
-        return httpx.Response(200, json={
-            "request_id": "chatcmpl-render-1",
-            "token_ids": list(self.rendered_ids),
-            "sampling_params": sampling_params,
-            "model": body.get("model"),
-            "stream": True,
-            "stream_options": {"include_usage": True},
-        })
+        return httpx.Response(
+            200,
+            json={
+                "request_id": "chatcmpl-render-1",
+                "token_ids": list(self.rendered_ids),
+                "sampling_params": sampling_params,
+                "model": body.get("model"),
+                "stream": True,
+                "stream_options": {"include_usage": True},
+            },
+        )
 
     def _generate(self, body: dict) -> httpx.Response:
         if self.generate_raw is not None:
@@ -116,68 +122,73 @@ class _VllmReplica:
         # Faithful to v0.24.0: no logprobs block when sampling logprobs is null.
         logprobs = None
         if body.get("sampling_params", {}).get("logprobs") is not None:
-            logprobs = {"content": [
-                {"token": f"token_id:{t}", "logprob": -0.1, "bytes": None, "top_logprobs": []} for t in ids
-            ]}
-        return httpx.Response(200, json={
-            # v0.24.0 shape: no usage/model/created, random request_id.
-            "request_id": "9f0e6d1c",
-            "choices": [{
-                "index": 0,
-                "finish_reason": self.finish_reason,
-                "token_ids": ids,
-                "logprobs": logprobs,
-            }],
-            "prompt_logprobs": None,
-        })
+            logprobs = {
+                "content": [{"token": f"token_id:{t}", "logprob": -0.1, "bytes": None, "top_logprobs": []} for t in ids]
+            }
+        return httpx.Response(
+            200,
+            json={
+                # v0.24.0 shape: no usage/model/created, random request_id.
+                "request_id": "9f0e6d1c",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": self.finish_reason,
+                        "token_ids": ids,
+                        "logprobs": logprobs,
+                    }
+                ],
+                "prompt_logprobs": None,
+            },
+        )
 
     def _derender(self, body: dict) -> httpx.Response:
         if self.derender_raw_content is not None:
-            return httpx.Response(
-                200, content=self.derender_raw_content, headers={"content-type": "application/json"}
-            )
+            return httpx.Response(200, content=self.derender_raw_content, headers={"content-type": "application/json"})
         gen = body["generate_response"]
         prompt_tokens = body.get("prompt_tokens") or 0
         completion_tokens = sum(len(c.get("token_ids") or []) for c in gen.get("choices", []))
-        return httpx.Response(200, json={
-            "id": gen.get("request_id", "x"), "object": "chat.completion", "created": 1,
-            "model": body["model"],
-            "choices": [{
-                "index": c.get("index", 0),
-                # real derender passes finish_reason through verbatim — it
-                # never rewrites to "tool_calls"; the gateway does that.
-                "finish_reason": c.get("finish_reason"),
-                "message": dict(self.message),
-                "stop_reason": None,
-            } for c in gen.get("choices", [])],
-            "usage": {
-                "prompt_tokens": prompt_tokens,
-                "completion_tokens": completion_tokens,
-                "total_tokens": prompt_tokens + completion_tokens,
+        return httpx.Response(
+            200,
+            json={
+                "id": gen.get("request_id", "x"),
+                "object": "chat.completion",
+                "created": 1,
+                "model": body["model"],
+                "choices": [
+                    {
+                        "index": c.get("index", 0),
+                        # real derender passes finish_reason through verbatim — it
+                        # never rewrites to "tool_calls"; the gateway does that.
+                        "finish_reason": c.get("finish_reason"),
+                        "message": dict(self.message),
+                        "stop_reason": None,
+                    }
+                    for c in gen.get("choices", [])
+                ],
+                "usage": {
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "total_tokens": prompt_tokens + completion_tokens,
+                },
             },
-        })
+        )
 
 
 @pytest.fixture()
 def server(tok, monkeypatch):
-    monkeypatch.setattr(
-        "agentix.tito.engine.session_app.load_tokenizer", lambda *a, **k: tok
-    )
+    monkeypatch.setattr("agentix.tito.engine.session_app.load_tokenizer", lambda *a, **k: tok)
     pool = BackendPool([A])
     srv = SessionServer(_args(), pool)
     replica = _VllmReplica()
-    srv._backend.client = httpx.AsyncClient(
-        transport=httpx.MockTransport(replica.handler), timeout=5.0
-    )
+    srv._backend.client = httpx.AsyncClient(transport=httpx.MockTransport(replica.handler), timeout=5.0)
     return srv, replica
 
 
 @pytest.fixture()
 def gateway(server):
     srv, replica = server
-    client = httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=srv.app), base_url="http://gw", timeout=5.0
-    )
+    client = httpx.AsyncClient(transport=httpx.ASGITransport(app=srv.app), base_url="http://gw", timeout=5.0)
     return client, replica
 
 
@@ -201,6 +212,37 @@ async def test_full_vllm_session_flow_over_http(gateway):
     got = (await client.get(f"/sessions/{sid}")).json()
     assert len(got["records"]) == 1
     assert got["metadata"]["accumulated_token_ids"] == prompt_ids + [7, 8]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field", ["content", "reasoning"])
+async def test_vllm_terminal_eos_is_not_rendered_twice(gateway, tok, field):
+    client, replica = gateway
+    replica.completion_ids = [7, tok.eos_token_id]
+    replica.message = {"role": "assistant", "content": None, field: "ok" + tok.eos_token}
+    sid = (await client.post("/sessions")).json()["session_id"]
+    response = await client.post(f"/sessions/{sid}/v1/chat/completions", json=_CHAT)
+    assert response.status_code == 200
+    assert response.json()["choices"][0]["message"][field] == "ok"
+    recorded = (await client.get(f"/sessions/{sid}")).json()
+    assert (
+        recorded["metadata"]["accumulated_token_ids"]
+        == replica.calls["generate"][0]["token_ids"] + replica.completion_ids
+    )
+    assert response.json()["usage"]["completion_tokens"] == 2
+    assert replica.calls["derender"][0]["generate_response"]["choices"][0]["token_ids"] == replica.completion_ids
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("finish,terminal", [("stop", False), ("length", True)])
+async def test_vllm_preserves_literal_eos_text_without_terminal_stop(gateway, tok, finish, terminal):
+    client, replica = gateway
+    replica.completion_ids = [7, tok.eos_token_id if terminal else 8]
+    replica.finish_reason = finish
+    replica.message = {"role": "assistant", "content": "ok" + tok.eos_token}
+    sid = (await client.post("/sessions")).json()["session_id"]
+    response = await client.post(f"/sessions/{sid}/v1/chat/completions", json=_CHAT)
+    assert response.json()["choices"][0]["message"]["content"] == "ok" + tok.eos_token
 
 
 @pytest.mark.asyncio
@@ -274,9 +316,7 @@ async def test_vllm_explicit_null_top_logprobs_is_normalized(gateway):
     block, and every turn would 502. The gateway must coerce null to 0."""
     client, replica = gateway
     sid = (await client.post("/sessions")).json()["session_id"]
-    r = await client.post(
-        f"/sessions/{sid}/v1/chat/completions", json={**_CHAT, "top_logprobs": None}
-    )
+    r = await client.post(f"/sessions/{sid}/v1/chat/completions", json={**_CHAT, "top_logprobs": None})
     assert r.status_code == 200
     assert replica.calls["render"][0]["top_logprobs"] == 0
 
@@ -285,9 +325,7 @@ async def test_vllm_explicit_null_top_logprobs_is_normalized(gateway):
 async def test_vllm_agent_requested_top_logprobs_is_preserved(gateway):
     client, replica = gateway
     sid = (await client.post("/sessions")).json()["session_id"]
-    r = await client.post(
-        f"/sessions/{sid}/v1/chat/completions", json={**_CHAT, "top_logprobs": 5}
-    )
+    r = await client.post(f"/sessions/{sid}/v1/chat/completions", json={**_CHAT, "top_logprobs": 5})
     assert r.status_code == 200
     assert replica.calls["render"][0]["top_logprobs"] == 5
 
@@ -322,10 +360,13 @@ async def test_vllm_tool_call_turn_rewrites_finish_reason(gateway):
     replica.message = {
         "role": "assistant",
         "content": None,
-        "tool_calls": [{
-            "id": "call_1", "type": "function",
-            "function": {"name": "compute", "arguments": "{}"},
-        }],
+        "tool_calls": [
+            {
+                "id": "call_1",
+                "type": "function",
+                "function": {"name": "compute", "arguments": "{}"},
+            }
+        ],
     }
     sid = (await client.post("/sessions")).json()["session_id"]
     r = await client.post(f"/sessions/{sid}/v1/chat/completions", json={**_CHAT, "tools": _TOOLS})
@@ -433,9 +474,7 @@ async def test_vllm_reasoning_is_mirrored_for_the_template_dialect(server):
     the stored trajectory message must carry the derendered reasoning under
     that key too, while the wire response keeps vLLM's `reasoning` verbatim."""
     srv, replica = server
-    client = httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=srv.app), base_url="http://gw", timeout=5.0
-    )
+    client = httpx.AsyncClient(transport=httpx.ASGITransport(app=srv.app), base_url="http://gw", timeout=5.0)
     replica.message = {"role": "assistant", "content": "ok done", "reasoning": "You are ok"}
     sid = (await client.post("/sessions")).json()["session_id"]
     r = await client.post(f"/sessions/{sid}/v1/chat/completions", json=_CHAT)
@@ -472,7 +511,8 @@ async def test_vllm_generate_error_passes_through(gateway):
 async def test_vllm_derender_error_passes_through(gateway):
     client, replica = gateway
     replica.fail["derender"] = (
-        503, {"error": {"message": "parser overloaded", "type": "ServiceUnavailableError", "code": 503}}
+        503,
+        {"error": {"message": "parser overloaded", "type": "ServiceUnavailableError", "code": 503}},
     )
     sid = (await client.post("/sessions")).json()["session_id"]
     r = await client.post(f"/sessions/{sid}/v1/chat/completions", json=_CHAT)
@@ -489,9 +529,9 @@ async def test_vllm_malformed_generate_body_is_502(gateway):
     for weird in (
         {"weird": True},
         {"choices": []},
-        {"choices": [{"index": 0, "finish_reason": "stop"}]},          # token_ids missing
-        {"choices": [{"index": 0, "token_ids": []}]},                  # empty
-        {"choices": [{"index": 0, "token_ids": ["a", "b"]}]},          # non-int
+        {"choices": [{"index": 0, "finish_reason": "stop"}]},  # token_ids missing
+        {"choices": [{"index": 0, "token_ids": []}]},  # empty
+        {"choices": [{"index": 0, "token_ids": ["a", "b"]}]},  # non-int
     ):
         replica.generate_raw = weird
         r = await client.post(f"/sessions/{sid}/v1/chat/completions", json=_CHAT)
@@ -509,9 +549,19 @@ async def test_vllm_logprobs_count_mismatch_is_502(gateway):
     sid = (await client.post("/sessions")).json()["session_id"]
     for weird in (
         {"choices": [{"index": 0, "token_ids": [7, 8]}]},  # logprobs missing
-        {"choices": [{"index": 0, "token_ids": [7, 8], "logprobs": {"content": [
-            {"token": "token_id:7", "logprob": -0.1, "bytes": None, "top_logprobs": []},
-        ]}}]},
+        {
+            "choices": [
+                {
+                    "index": 0,
+                    "token_ids": [7, 8],
+                    "logprobs": {
+                        "content": [
+                            {"token": "token_id:7", "logprob": -0.1, "bytes": None, "top_logprobs": []},
+                        ]
+                    },
+                }
+            ]
+        },
     ):
         replica.generate_raw = weird
         r = await client.post(f"/sessions/{sid}/v1/chat/completions", json=_CHAT)
@@ -551,9 +601,7 @@ async def test_vllm_turn_record_retains_logprobs_and_render_skew(tok, monkeypatc
     client = httpx.AsyncClient(transport=httpx.ASGITransport(app=srv.app), base_url="http://gw", timeout=5.0)
 
     sid = (await client.post("/sessions")).json()["session_id"]
-    r = await client.post(
-        f"/sessions/{sid}/v1/chat/completions", json=_CHAT, headers={"x-request-id": "req-v1"}
-    )
+    r = await client.post(f"/sessions/{sid}/v1/chat/completions", json=_CHAT, headers={"x-request-id": "req-v1"})
     assert r.status_code == 200
 
     lines = [json.loads(line) for line in (tmp_path / f"{sid}.jsonl").read_text().splitlines()]
@@ -586,10 +634,13 @@ async def test_vllm_tool_call_record_carries_rewritten_finish_reason(tok, monkey
     replica.message = {
         "role": "assistant",
         "content": None,
-        "tool_calls": [{
-            "id": "call_1", "type": "function",
-            "function": {"name": "compute", "arguments": "{}"},
-        }],
+        "tool_calls": [
+            {
+                "id": "call_1",
+                "type": "function",
+                "function": {"name": "compute", "arguments": "{}"},
+            }
+        ],
     }
     srv._backend.client = httpx.AsyncClient(transport=httpx.MockTransport(replica.handler), timeout=5.0)
     client = httpx.AsyncClient(transport=httpx.ASGITransport(app=srv.app), base_url="http://gw", timeout=5.0)

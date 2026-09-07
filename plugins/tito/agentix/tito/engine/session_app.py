@@ -75,6 +75,8 @@ def setup_session_routes(app: FastAPI, backend: Backend, args: Any) -> None:
     adapter = get_upstream(
         getattr(args, "backend_kind", "sglang"),
         context_window=getattr(args, "tito_context_window", None),
+        eos_token_id=getattr(registry.tokenizer, "eos_token_id", None),
+        eos_token=getattr(registry.tokenizer, "eos_token", None),
     )
     backend_kind = str(getattr(args, "backend_kind", "sglang") or "sglang")
 
