@@ -359,6 +359,7 @@ agentix/bridge/
 ├── capture.py                     # abridge.record.v1: capture levels, digests, prefix relation
 ├── recorder.py                    # Recorder: the JSONL sink for that record
 ├── sidecar.py                     # local process lifecycle + health supervision
+├── sidecars.py                    # presets for external sidecar binaries
 └── clients/                       # bundled handler implementations
     ├── openai.py                  # OpenAIClient (openai SDK) + PLACEHOLDER_API_KEY
     ├── anthropic.py               # AnthropicClient (anthropic SDK) + environ() + PLACEHOLDER_API_KEY
